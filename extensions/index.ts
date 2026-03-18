@@ -21,7 +21,9 @@ interface HaConfig {
   errorHandling?: {
     capacityErrorAction?: ErrorAction;
     quotaErrorAction?: ErrorAction;
+    networkErrorAction?: ErrorAction;
     retryTimeoutMs?: number;
+    networkRetryDelayMs?: number;
   };
 }
 
@@ -287,7 +289,20 @@ export default function (pi: ExtensionAPI) {
                          errorLower.includes("rate limit") ||
                          errorLower.includes("insufficient quota");
     
-    if (!isCapacityError && !isQuotaError) return;
+    // Network errors: internal network failure, api_error, connection issues
+    // These are transient errors that should trigger an immediate retry
+    const isNetworkError = errorLower.includes("internal network failure") ||
+                           errorLower.includes("api_error") ||
+                           errorLower.includes("network failure") ||
+                           errorLower.includes("connection reset") ||
+                           errorLower.includes("connection refused") ||
+                           errorLower.includes("etimedout") ||
+                           errorLower.includes("econnreset") ||
+                           errorLower.includes("econnrefused") ||
+                           errorLower.includes("socket hang up") ||
+                           errorLower.includes("fetch failed");
+    
+    if (!isCapacityError && !isQuotaError && !isNetworkError) return;
 
     const providerId = ctx.model?.provider;
     if (!providerId) return;
@@ -297,27 +312,38 @@ export default function (pi: ExtensionAPI) {
 
     // Get error handling configuration
     const errorHandling = config.errorHandling || {};
-    const action: ErrorAction = isCapacityError 
-      ? (errorHandling.capacityErrorAction || "next_key_then_provider")
-      : (errorHandling.quotaErrorAction || "next_key_then_provider");
+    let action: ErrorAction;
+    let retryDelayMs: number;
     
-    const retryTimeoutMs = errorHandling.retryTimeoutMs || 300000; // Default 5 minutes
+    if (isNetworkError) {
+      // Network errors are transient, default to immediate retry
+      action = errorHandling.networkErrorAction || "retry";
+      retryDelayMs = errorHandling.networkRetryDelayMs || 1000; // Default 1 second for network errors
+    } else if (isCapacityError) {
+      action = errorHandling.capacityErrorAction || "next_key_then_provider";
+      retryDelayMs = errorHandling.retryTimeoutMs || 300000; // Default 5 minutes
+    } else {
+      action = errorHandling.quotaErrorAction || "next_key_then_provider";
+      retryDelayMs = errorHandling.retryTimeoutMs || 300000; // Default 5 minutes
+    }
 
     // Handle "stop" action
     if (action === "stop") {
-      ctx.ui.notify(`🛑 ${isCapacityError ? "Capacity" : "Quota"} error. Stopping as configured.`, "error");
+      const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
+      ctx.ui.notify(`🛑 ${errorType} error. Stopping as configured.`, "error");
       return;
     }
 
-    // Handle "retry" action
+    // Handle "retry" action - for network errors, this is the default
     if (action === "retry") {
       if (state.retryTimeoutId) {
         clearTimeout(state.retryTimeoutId);
       }
-      ctx.ui.notify(`⏱️ ${isCapacityError ? "Capacity" : "Quota"} error. Retrying in ${retryTimeoutMs}ms...`, "warning");
+      const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
+      ctx.ui.notify(`⏱️ ${errorType} error. Retrying in ${retryDelayMs}ms...`, "warning");
       state.retryTimeoutId = setTimeout(() => {
         retryTurn(ctx);
-      }, retryTimeoutMs);
+      }, retryDelayMs);
       return;
     }
 
@@ -346,7 +372,8 @@ export default function (pi: ExtensionAPI) {
           
           if (!isStillExhausted) {
             if (switchCred(providerId, nextName)) {
-              ctx.ui.notify(`⚠️ ${isCapacityError ? "Capacity" : "Quota"} error. Switching ${providerId} account to ${nextName}...`, "warning");
+              const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
+              ctx.ui.notify(`⚠️ ${errorType} error. Switching ${providerId} account to ${nextName}...`, "warning");
               retryTurn(ctx);
               return;
             }
@@ -386,6 +413,7 @@ export default function (pi: ExtensionAPI) {
               switchCred(nextProviderId, "primary");
               
               if (await pi.setModel(targetModel)) {
+                  const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
                   ctx.ui.notify(`🚨 All ${providerId} accounts exhausted. Failing over to ${nextProviderId}...`, "error");
                   retryTurn(ctx);
                   return;
@@ -395,7 +423,8 @@ export default function (pi: ExtensionAPI) {
     }
 
     // No fallback options worked
-    ctx.ui.notify(`❌ ${isCapacityError ? "Capacity" : "Quota"} error. No fallback options available.`, "error");
+    const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
+    ctx.ui.notify(`❌ ${errorType} error. No fallback options available.`, "error");
   });
 
   function retryTurn(ctx: any) {
