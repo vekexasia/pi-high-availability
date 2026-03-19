@@ -6,7 +6,7 @@
 
 ---
 
-**Per-Session Group Selection** — You can now specify which HA group to use for a `--ha-group` CLI flag. This is useful when running multiple pi instances with different failover chains.
+**Per-Session Group Selection** — You can now specify which HA group to use via the `--ha-group` CLI flag. This is useful when running multiple pi instances with different failover chains.
 
 ### Usage
 
@@ -20,7 +20,7 @@ pi -e .pi/extensions/gastown-hooks.js --ha-group paid --model openai-codex/gpt-5
 
 This allows you to configure different gastown workers to use different HA groups based on their role.
 
-### How It works
+### How It Works
 
 When pi starts with `--ha-group paid`:
 1. Extension reads the flag value (`paid`)
@@ -31,6 +31,10 @@ When pi starts with `--ha-group paid`:
 When pi starts without `--ha-group`:
 1. Falls back to `defaultGroup` from `ha.json`
 2. All failover events use models from that group
+
+---
+
+**Network Error Handling** — The extension now detects transient network errors (connection resets, timeouts, internal network failures) and handles them separately from capacity/quota errors. By default, network errors trigger an immediate retry after 1 second, since they're usually temporary infrastructure issues that don't indicate a problem with your credentials.
 
 **Configurable Error Handling** — You can now control how the extension responds to different types of errors:
 
@@ -148,7 +152,9 @@ While you should use the `/ha` UI, you can also manually edit `~/.pi/agent/ha.js
   "errorHandling": {
     "capacityErrorAction": "next_provider",
     "quotaErrorAction": "next_key_then_provider",
-    "retryTimeoutMs": 300000
+    "networkErrorAction": "retry",
+    "retryTimeoutMs": 300000,
+    "networkRetryDelayMs": 1000
   },
   "credentials": {
     "anthropic": {
@@ -167,9 +173,19 @@ The `errorHandling` section in `ha.json` lets you customize how the extension re
 |---------|-------------|---------|
 | `capacityErrorAction` | Action when provider has no capacity (affects all accounts) | `next_key_then_provider` |
 | `quotaErrorAction` | Action when account hits rate limit (may not affect other accounts) | `next_key_then_provider` |
-| `retryTimeoutMs` | How long to wait before retrying (in milliseconds) | `300000` (5 minutes) |
+| `networkErrorAction` | Action when transient network error occurs | `retry` |
+| `retryTimeoutMs` | How long to wait before retrying capacity/quota errors (ms) | `300000` (5 minutes) |
+| `networkRetryDelayMs` | How long to wait before retrying network errors (ms) | `1000` (1 second) |
 
 #### Understanding the Error Types
+
+**Network Errors** occur due to transient infrastructure issues. Examples:
+- "Internal network failure"
+- "Connection reset" / "Connection refused"
+- "ETIMEDOUT" / "ECONNRESET"
+- "Socket hang up" / "Fetch failed"
+
+These are temporary issues that usually resolve quickly. The default action is `retry` after 1 second. Unlike quota/capacity errors, credentials are **not** marked as exhausted for network errors.
 
 **Capacity Errors** occur when a provider's servers are overloaded. Examples:
 - "No capacity available for this model"

@@ -51,7 +51,9 @@ interface HaConfig {
   errorHandling?: {
     capacityErrorAction?: ErrorAction;
     quotaErrorAction?: ErrorAction;
+    networkErrorAction?: ErrorAction;
     retryTimeoutMs?: number;
+    networkRetryDelayMs?: number;
   };
 }
 
@@ -337,6 +339,32 @@ export class HaUi {
             if (!isNaN(num)) {
               if (!this.config.errorHandling) this.config.errorHandling = {};
               this.config.errorHandling.retryTimeoutMs = num;
+            }
+            this.accordion.setSections(this.buildSections());
+          });
+        }
+      },
+      {
+        id: "set-network-action",
+        label: `🌐 Network Error: ${errorHandling.networkErrorAction || "retry"}`,
+        action: () => {
+          const actions: ErrorAction[] = ["stop", "retry", "next_provider", "next_key_then_provider"];
+          const current = errorHandling.networkErrorAction || "retry";
+          const nextIdx = (actions.indexOf(current) + 1) % actions.length;
+          if (!this.config.errorHandling) this.config.errorHandling = {};
+          this.config.errorHandling.networkErrorAction = actions[nextIdx];
+          this.accordion.setSections(this.buildSections());
+        }
+      },
+      {
+        id: "set-network-retry-delay",
+        label: `⚡ Network Retry Delay: ${errorHandling.networkRetryDelayMs || 1000}ms`,
+        action: () => {
+          this.showInput("Network Retry Delay (ms)", (errorHandling.networkRetryDelayMs || 1000).toString(), (val) => {
+            const num = parseInt(val);
+            if (!isNaN(num)) {
+              if (!this.config.errorHandling) this.config.errorHandling = {};
+              this.config.errorHandling.networkRetryDelayMs = num;
             }
             this.accordion.setSections(this.buildSections());
           });

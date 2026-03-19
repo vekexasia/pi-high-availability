@@ -312,6 +312,7 @@ export default function (pi: ExtensionAPI) {
 
     // Get error handling configuration
     const errorHandling = config.errorHandling || {};
+    const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
     let action: ErrorAction;
     let retryDelayMs: number;
     
@@ -329,7 +330,6 @@ export default function (pi: ExtensionAPI) {
 
     // Handle "stop" action
     if (action === "stop") {
-      const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
       ctx.ui.notify(`🛑 ${errorType} error. Stopping as configured.`, "error");
       return;
     }
@@ -339,7 +339,6 @@ export default function (pi: ExtensionAPI) {
       if (state.retryTimeoutId) {
         clearTimeout(state.retryTimeoutId);
       }
-      const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
       ctx.ui.notify(`⏱️ ${errorType} error. Retrying in ${retryDelayMs}ms...`, "warning");
       state.retryTimeoutId = setTimeout(() => {
         retryTurn(ctx);
@@ -358,9 +357,12 @@ export default function (pi: ExtensionAPI) {
         const names = Object.keys(stored).filter(k => k !== "type");
         const currentCred = state.activeCredential.get(providerId) || "primary";
         
-        // Mark current credential as exhausted
-        const cooldown = config.defaultCooldownMs || 3600000;
-        state.exhausted.set(`${providerId}:${currentCred}`, { exhaustedAt: Date.now(), cooldownMs: cooldown });
+        // Only mark credential as exhausted for quota/capacity errors
+        // Network errors are transient infrastructure issues, not credential problems
+        if (!isNetworkError) {
+          const cooldown = config.defaultCooldownMs || 3600000;
+          state.exhausted.set(`${providerId}:${currentCred}`, { exhaustedAt: Date.now(), cooldownMs: cooldown });
+        }
 
         // Try to find next available credential
         for (let i = 1; i <= names.length; i++) {
@@ -372,7 +374,6 @@ export default function (pi: ExtensionAPI) {
           
           if (!isStillExhausted) {
             if (switchCred(providerId, nextName)) {
-              const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
               ctx.ui.notify(`⚠️ ${errorType} error. Switching ${providerId} account to ${nextName}...`, "warning");
               retryTurn(ctx);
               return;
@@ -413,7 +414,6 @@ export default function (pi: ExtensionAPI) {
               switchCred(nextProviderId, "primary");
               
               if (await pi.setModel(targetModel)) {
-                  const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
                   ctx.ui.notify(`🚨 All ${providerId} accounts exhausted. Failing over to ${nextProviderId}...`, "error");
                   retryTurn(ctx);
                   return;
@@ -423,7 +423,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     // No fallback options worked
-    const errorType = isNetworkError ? "Network" : (isCapacityError ? "Capacity" : "Quota");
     ctx.ui.notify(`❌ ${errorType} error. No fallback options available.`, "error");
   });
 
