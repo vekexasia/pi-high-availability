@@ -41,6 +41,10 @@ const AGENT_DIR = join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "ha.json");
 const AUTH_PATH = join(AGENT_DIR, "auth.json");
 
+// Module-level hook — assigned inside export default once `pi` is available,
+// so switchCred() can call it without needing `pi` in its own scope.
+let persistState: () => void = () => {};
+
 const state = {
   activeGroup: null as string | null,
   exhausted: new Map<string, ExhaustionEntry>(),
@@ -171,6 +175,7 @@ async function switchCred(providerId: string, name: string, ctx?: any): Promise<
     ctx.modelRegistry.authStorage.reload();
   }
 
+  persistState();
   return true;
 }
 
@@ -240,7 +245,41 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
+  // Serialise the three critical state fields into a custom session entry.
+  persistState = () => {
+    const serialized = {
+      activeGroup: state.activeGroup,
+      exhausted: Object.fromEntries(
+        [...state.exhausted.entries()].map(([k, v]) => [k, v])
+      ),
+      activeCredential: Object.fromEntries(state.activeCredential),
+    };
+    pi.appendEntry("ha-state", serialized);
+  };
+
   pi.on("session_start", async (_event, ctx) => {
+    // Restore persisted HA state from the most recent ha-state entry.
+    const entries = ctx.sessionManager.getEntries();
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i] as any;
+      if (entry.type === "custom" && entry.customType === "ha-state" && entry.data) {
+        const data = entry.data;
+        if (data.activeGroup) state.activeGroup = data.activeGroup;
+        if (data.exhausted) {
+          state.exhausted.clear();
+          for (const [k, v] of Object.entries(data.exhausted)) {
+            state.exhausted.set(k, v as ExhaustionEntry);
+          }
+        }
+        if (data.activeCredential) {
+          state.activeCredential.clear();
+          for (const [k, v] of Object.entries(data.activeCredential)) {
+            state.activeCredential.set(k, v as string);
+          }
+        }
+        break; // Use the most recent entry only
+      }
+    }
     updateStatusBar(ctx);
   });
 
@@ -384,6 +423,7 @@ export default function (pi: ExtensionAPI) {
       config.defaultGroup = name;
 
       await saveConfig(config);
+      persistState();
       updateStatusBar(ctx);
       ctx.ui.notify(
         `[HA] Group '${name}' set with ${entries.length} model(s): ${modelIds.join(", ")}`,
@@ -433,6 +473,7 @@ export default function (pi: ExtensionAPI) {
         state.activeCredential.clear();
         state.exhausted.clear();
         await saveConfig(config);
+        persistState();
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials (${providerCount} provider(s)).`, "info");
         return;
@@ -454,6 +495,7 @@ export default function (pi: ExtensionAPI) {
           state.exhausted.delete(getCredentialExhaustionKey(provider, n));
         }
         await saveConfig(config);
+        persistState();
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials for ${provider} (${names.length} key(s)).`, "info");
         return;
@@ -506,6 +548,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       await saveConfig(config);
+      persistState();
       updateStatusBar(ctx);
       ctx.ui.notify(`[HA] Cleared credential '${name}' for ${provider}.`, "info");
     },
@@ -613,6 +656,7 @@ export default function (pi: ExtensionAPI) {
                 "warning",
               );
               updateStatusBar(ctx);
+              persistState();
               retryTurn(ctx);
               return;
             }
@@ -675,6 +719,7 @@ export default function (pi: ExtensionAPI) {
             "warning",
           );
           updateStatusBar(ctx);
+          persistState();
           retryTurn(ctx);
           return;
         }
@@ -688,6 +733,7 @@ export default function (pi: ExtensionAPI) {
       `[HA] ${errorLabel} error — all fallback options exhausted. No providers available.`,
       "error",
     );
+    persistState();
     updateStatusBar(ctx);
   });
 
