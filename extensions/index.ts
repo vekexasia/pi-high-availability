@@ -4,10 +4,17 @@
 
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { readFileSync, existsSync, writeFileSync } from "fs";
+import { readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { homedir } from "os";
-import { HaUi } from "./ui/HaUi";
+import {
+  ensureCredentialMeta,
+  getCredentialNames,
+  getDefaultCredentialName,
+  isCredentialEntryKey,
+  normalizeCredentialProviders,
+  setDefaultCredentialName,
+} from "./credentialMeta";
 
 type ErrorAction = "stop" | "retry" | "next_provider" | "next_key_then_provider";
 
@@ -31,11 +38,25 @@ const AUTH_PATH = join(AGENT_DIR, "auth.json");
 
 const state = {
   activeGroup: null as string | null,
-  exhausted: new Map<string, { exhaustedAt: number, cooldownMs: number }>(),
+  exhausted: new Map<string, { exhaustedAt: number; cooldownMs: number }>(),
   isRetrying: false,
   activeCredential: new Map<string, string>(),
   retryTimeoutId: null as NodeJS.Timeout | null,
+  lastStatusCtx: null as any,
 };
+
+function updateStatusBar(ctx?: any) {
+  const c = ctx || state.lastStatusCtx;
+  if (!c?.ui) return;
+  state.lastStatusCtx = c;
+
+  const group = state.activeGroup || "none";
+  const exhaustedCount = [...state.exhausted.entries()].filter(
+    ([, s]) => Date.now() - s.exhaustedAt < s.cooldownMs,
+  ).length;
+  const exhaustedStr = exhaustedCount > 0 ? ` | ${exhaustedCount} exhausted` : "";
+  c.ui.setStatus("ha", `HA: ${group}${exhaustedStr}`);
+}
 
 let config: HaConfig | null = null;
 
@@ -49,11 +70,12 @@ function saveAuthJson(auth: any) {
 }
 
 function saveConfig(cfg: HaConfig) {
+  normalizeCredentialProviders(cfg.credentials as any);
   config = cfg;
   writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-function syncAuthToHa() {
+function syncAuthToHa(ctx?: any) {
   if (!config) return;
   const auth = loadAuthJson();
   if (!config.credentials) config.credentials = {};
@@ -62,56 +84,109 @@ function syncAuthToHa() {
   for (const [providerId, creds] of Object.entries(auth)) {
     if (!config.credentials[providerId]) config.credentials[providerId] = {};
     const stored = config.credentials[providerId];
-    
-    let foundName = null;
+    ensureCredentialMeta(stored as any);
+
+    let foundName: string | null = null;
     for (const [name, existing] of Object.entries(stored)) {
-      if (name === "type") continue;
-      if ((creds as any).refresh && (creds as any).refresh === existing.refresh) { foundName = name; break; }
-      if ((creds as any).key && (creds as any).key === existing.key) { foundName = name; break; }
+      if (!isCredentialEntryKey(name)) continue;
+      if ((creds as any).refresh && (creds as any).refresh === (existing as any).refresh) { foundName = name; break; }
+      if ((creds as any).key && (creds as any).key === (existing as any).key) { foundName = name; break; }
     }
 
     if (!foundName) {
-      const name = stored["primary"] ? `backup-${Object.keys(stored).filter(k => k !== "type").length}` : "primary";
+      const existingNames = getCredentialNames(stored as any);
+      const name = existingNames.length === 0 ? "primary" : `backup-${existingNames.length}`;
       const newCred = JSON.parse(JSON.stringify(creds));
       if ((creds as any).refresh) newCred.type = "oauth";
       else if ((creds as any).key) newCred.type = "api_key";
-      
+
       stored[name] = newCred;
+      if (existingNames.length === 0) {
+        setDefaultCredentialName(stored as any, name);
+      }
       changed = true;
-      console.log(`[HA] Synced ${name} for ${providerId}`);
+
+      const msg =
+        existingNames.length === 0
+          ? `[HA] Credential synced for ${providerId} as '${name}'.`
+          : `[HA] New credential synced for ${providerId} as '${name}'. Use /ha-rename ${providerId} ${name} <name> to rename it.`;
+
+      if (ctx?.ui) {
+        ctx.ui.notify(msg, "info");
+      } else {
+        console.log(msg);
+      }
       state.activeCredential.set(providerId, name);
     } else {
+      ensureCredentialMeta(stored as any);
       state.activeCredential.set(providerId, foundName);
     }
   }
   if (changed) saveConfig(config);
 }
 
-function switchCred(providerId: string, name: string) {
-  if (!config?.credentials?.[providerId]?.[name]) return false;
+/**
+ * Freshen the active ha.json credential entry with the latest tokens from auth.json.
+ * Called on every turn_start so that pi's silently-refreshed OAuth tokens are never stale in ha.json.
+ */
+function syncActiveCredentialFromAuth(): boolean {
+  if (!config?.credentials) return false;
   const auth = loadAuthJson();
-  
-  
-  
-  const credToSave = JSON.parse(JSON.stringify(config.credentials[providerId][name]));
-  
+  let changed = false;
+
+  for (const [providerId, currentAuth] of Object.entries(auth)) {
+    const stored = config.credentials[providerId];
+    if (!stored) continue;
+
+    const activeName = state.activeCredential.get(providerId);
+    if (!activeName || !stored[activeName]) continue;
+
+    // Overwrite token fields with fresh data; preserve our metadata fields (type)
+    const fresh = JSON.parse(JSON.stringify(currentAuth));
+    const existing = stored[activeName];
+    const merged = { ...existing, ...fresh };
+    if (existing.type) merged.type = existing.type;
+
+    if (JSON.stringify(existing) !== JSON.stringify(merged)) {
+      stored[activeName] = merged;
+      changed = true;
+    }
+  }
+
+  if (changed) saveConfig(config);
+  return changed;
+}
+
+function switchCred(providerId: string, name: string, ctx?: any): boolean {
+  const stored = config?.credentials?.[providerId];
+  if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
+  const auth = loadAuthJson();
+
+  const credToSave = JSON.parse(JSON.stringify(stored[name]));
   auth[providerId] = credToSave;
   saveAuthJson(auth);
   state.activeCredential.set(providerId, name);
+
+  // Force pi to re-read auth.json into memory.
+  if (ctx?.modelRegistry?.authStorage?.reload) {
+    ctx.modelRegistry.authStorage.reload();
+  }
+
   return true;
 }
 
 function updateActiveCredentialsFromAuth() {
   if (!config?.credentials) return;
   const auth = loadAuthJson();
-  
+
   for (const [providerId, currentAuth] of Object.entries(auth)) {
     const stored = config.credentials[providerId];
     if (!stored) continue;
+    ensureCredentialMeta(stored as any);
 
     for (const [name, cred] of Object.entries(stored)) {
-      if (name === "type") continue;
-      
+      if (!isCredentialEntryKey(name)) continue;
+
       if ((currentAuth as any).key && (currentAuth as any).key === (cred as any).key) {
         state.activeCredential.set(providerId, name);
         break;
@@ -124,127 +199,337 @@ function updateActiveCredentialsFromAuth() {
   }
 }
 
+function getCredentialExhaustionKey(providerId: string, name: string) {
+  return `cred:${providerId}:${name}`;
+}
+
+function getEntryExhaustionKey(entryId: string) {
+  return `entry:${entryId}`;
+}
+
+function isExhausted(key: string) {
+  const exhaustState = state.exhausted.get(key);
+  return !!exhaustState && Date.now() - exhaustState.exhaustedAt < exhaustState.cooldownMs;
+}
+
+function markExhausted(key: string, cooldownMs: number) {
+  state.exhausted.set(key, { exhaustedAt: Date.now(), cooldownMs });
+}
+
+function getCurrentGroupEntry(group: HaGroup, model?: Model<any> | null) {
+  if (!model) return { entry: undefined as HaGroupEntry | undefined, index: -1 };
+  const currentModelId = `${model.provider}/${model.id}`;
+  const index = group.entries.findIndex((e) => e.id === currentModelId || e.id === model.provider);
+  return { entry: index >= 0 ? group.entries[index] : undefined, index };
+}
+
+function resolveGroupEntryModel(entryId: string, modelRegistry: any) {
+  const slashIndex = entryId.indexOf("/");
+  if (slashIndex !== -1) {
+    const provider = entryId.slice(0, slashIndex);
+    const modelId = entryId.slice(slashIndex + 1);
+    return modelRegistry.find(provider, modelId);
+  }
+
+  const allModels = modelRegistry.getAll();
+  return allModels.find((m: Model<any>) => m.provider === entryId);
+}
+
+function pickCredentialForProvider(providerId: string) {
+  const stored = config?.credentials?.[providerId];
+  if (!stored) return undefined;
+
+  const names = getCredentialNames(stored as any);
+  if (names.length === 0) return undefined;
+
+  const active = state.activeCredential.get(providerId);
+  const preferred = [active, getDefaultCredentialName(stored as any), ...names].filter(
+    (name, idx, arr): name is string => !!name && arr.indexOf(name) === idx,
+  );
+
+  return preferred.find((name) => !isExhausted(getCredentialExhaustionKey(providerId, name)));
+}
+
 export default function (pi: ExtensionAPI) {
   try {
     config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    normalizeCredentialProviders(config?.credentials as any);
     if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
     syncAuthToHa();
     updateActiveCredentialsFromAuth();
   } catch {}
 
+  pi.on("session_start", async (_event, ctx) => {
+    updateStatusBar(ctx);
+  });
+
+  // ─── /ha — print current status ────────────────────────────────────────────
   pi.registerCommand("ha", {
-    description: "High Availability Manager UI",
+    description: "Show HA status (active group, credentials, exhaustion state)",
     handler: async (_, ctx) => {
       if (!config) {
-        config = { groups: {}, credentials: {}, defaultCooldownMs: 5000 };
-        saveConfig(config);
+        ctx.ui.notify(
+          "[HA] No configuration found. Create ~/.pi/agent/ha.json or use /ha-group.",
+          "warning",
+        );
+        return;
       }
-      
-      syncAuthToHa(); 
+      syncAuthToHa(ctx);
 
-      const loop = async () => {
-          const result = await ctx.ui.custom<any | null>(
-            (tui, theme, _kb, done) => {
-              const haUi = new HaUi(ctx, config!, state.activeGroup, (res) => done(res));
-              return {
-                render: (w) => haUi.render(w),
-                handleInput: (data) => haUi.handleInput(data, tui),
-                invalidate: () => haUi.invalidate(),
-              };
-            }
+      const lines: string[] = [];
+      lines.push(`Active Group: ${state.activeGroup || "none"}`);
+
+      // Groups
+      if (Object.keys(config.groups).length > 0) {
+        lines.push("\nGroups:");
+        for (const [name, group] of Object.entries(config.groups)) {
+          const isActive = name === state.activeGroup;
+          const isDefault = name === config.defaultGroup;
+          const markers = [isActive ? "active" : "", isDefault ? "default" : ""].filter(Boolean).join(", ");
+          lines.push(
+            `  ${isActive ? "●" : "○"} ${name} (${group.entries.length} models)${markers ? ` [${markers}]` : ""}`,
           );
-
-          if (!result) return;
-
-          if (result.action === "sync") {
-              saveConfig(result.config);
-              syncAuthToHa();
-              ctx.ui.notify("Synced credentials from auth.json", "info");
-              await loop();
-          } else if (result.action === "activate") {
-              saveConfig(result.config);
-              if (switchCred(result.provider, result.name)) {
-                ctx.ui.notify(`Activated ${result.name} for ${result.provider}`, "info");
-              }
-              await loop();
-          } else if (result.action === "oauth") {
-              saveConfig(result.config);
-              ctx.ui.notify(`Running /login...`, "info");
-              await pi.sendUserMessage("/login", { deliverAs: "steer" });
-          } else {
-              saveConfig(result.config);
-              state.activeGroup = result.activeGroup;
-              
-              
-              if (result.changedCreds) {
-                for (const [provider, name] of Object.entries(result.changedCreds)) {
-                  if (switchCred(provider, name as string)) {
-                    ctx.ui.notify(`Activated ${name} for ${provider}`, "info");
-                  }
-                }
-              }
-              
-              ctx.ui.notify("HA configuration saved.", "info");
+          for (const entry of group.entries) {
+            const exhausted = isExhausted(getEntryExhaustionKey(entry.id));
+            lines.push(`    - ${entry.id}${exhausted ? " ⛔ exhausted" : ""}`);
           }
-      };
-
-      await loop();
-    }
-  });
-
-  pi.registerCommand("ha-status", {
-    description: "HA Status",
-    handler: async (_, ctx) => {
-      const lines = [`Active Group: ${state.activeGroup}`];
-      if (config?.credentials) {
-        lines.push("\nStored Credentials:");
-        for (const [p, creds] of Object.entries(config.credentials)) {
-          const active = state.activeCredential.get(p) || "primary";
-          lines.push(`  ${p}: ${Object.keys(creds).join(", ")} (Active: ${active})`);
         }
       }
+
+      // Credentials
+      if (config.credentials && Object.keys(config.credentials).length > 0) {
+        lines.push("\nCredentials:");
+        for (const [provider, creds] of Object.entries(config.credentials)) {
+          const names = getCredentialNames(creds as any);
+          const active =
+            state.activeCredential.get(provider) ||
+            getDefaultCredentialName(creds as any) ||
+            "none";
+          lines.push(`  ${provider}: ${names.join(", ")} (active: ${active})`);
+          for (const name of names) {
+            const exhausted = isExhausted(getCredentialExhaustionKey(provider, name));
+            if (exhausted) lines.push(`    ⛔ ${name} exhausted`);
+          }
+        }
+      }
+
       ctx.ui.notify(lines.join("\n"), "info");
-    }
+    },
   });
 
-  pi.registerCommand("ha-sync", {
-    description: "Sync Credentials",
-    handler: async (_, ctx) => { syncAuthToHa(); ctx.ui.notify("Synced!", "info"); }
+  // ─── /ha-rename <provider> <old-name> <new-name> ────────────────────────────
+  pi.registerCommand("ha-rename", {
+    description: "Rename a credential: /ha-rename <provider> <old-name> <new-name>",
+    handler: async (args, ctx) => {
+      const parts = (args || "").trim().split(/\s+/);
+      if (parts.length !== 3 || !parts[0]) {
+        ctx.ui.notify("Usage: /ha-rename <provider> <old-name> <new-name>", "warning");
+        return;
+      }
+      const [provider, oldName, newName] = parts;
+
+      if (!config?.credentials?.[provider]) {
+        ctx.ui.notify(`[HA] Provider '${provider}' not found.`, "warning");
+        return;
+      }
+      const stored = config.credentials[provider];
+
+      if (!stored[oldName] || !isCredentialEntryKey(oldName)) {
+        ctx.ui.notify(`[HA] Credential '${oldName}' not found for ${provider}.`, "warning");
+        return;
+      }
+
+      const reserved = ["type", "__meta", "__proto__", "constructor", "prototype"];
+      if (reserved.includes(newName)) {
+        ctx.ui.notify(`[HA] '${newName}' is a reserved name.`, "warning");
+        return;
+      }
+
+      if (getCredentialNames(stored as any).includes(newName)) {
+        ctx.ui.notify(`[HA] Name '${newName}' already exists for ${provider}.`, "warning");
+        return;
+      }
+
+      // Rebuild object preserving insertion order
+      const newCreds: Record<string, any> = {};
+      for (const [k, v] of Object.entries(stored)) {
+        newCreds[k === oldName ? newName : k] = v;
+      }
+      config.credentials[provider] = newCreds;
+
+      // Update default name if the renamed one was default
+      if (getDefaultCredentialName(stored as any) === oldName) {
+        setDefaultCredentialName(newCreds as any, newName);
+      } else {
+        ensureCredentialMeta(newCreds as any);
+      }
+
+      // Update active tracking
+      if (state.activeCredential.get(provider) === oldName) {
+        state.activeCredential.set(provider, newName);
+      }
+
+      saveConfig(config);
+      ctx.ui.notify(`[HA] Renamed ${provider}: ${oldName} → ${newName}`, "info");
+    },
   });
 
-  pi.registerCommand("ha-mock-error", {
-    handler: async () => { pi.sendUserMessage("MOCK_FAILOVER_TRIGGER", { deliverAs: "steer" }); }
+  // ─── /ha-group <name> <model-id1> [model-id2 ...] ──────────────────────────
+  pi.registerCommand("ha-group", {
+    description: "Create/update a group: /ha-group <name> <model-id1> [model-id2 ...]",
+    handler: async (args, ctx) => {
+      const parts = (args || "").trim().split(/\s+/).filter(Boolean);
+      if (parts.length < 2) {
+        ctx.ui.notify("Usage: /ha-group <name> <model-id1> [model-id2 ...]", "warning");
+        return;
+      }
+      if (!config) {
+        config = { groups: {}, credentials: {}, defaultCooldownMs: 5000 };
+      }
+      const [name, ...modelIds] = parts;
+      const entries: HaGroupEntry[] = modelIds.map((id) => ({ id }));
+      config.groups[name] = { name, entries };
+
+      // Set as active and default group
+      state.activeGroup = name;
+      config.defaultGroup = name;
+
+      saveConfig(config);
+      updateStatusBar(ctx);
+      ctx.ui.notify(
+        `[HA] Group '${name}' set with ${entries.length} model(s): ${modelIds.join(", ")}`,
+        "info",
+      );
+    },
+  });
+
+  // ─── /ha-activate <provider> <name> ────────────────────────────────────────
+  pi.registerCommand("ha-activate", {
+    description: "Activate a credential: /ha-activate <provider> <name>",
+    handler: async (args, ctx) => {
+      const parts = (args || "").trim().split(/\s+/);
+      if (parts.length !== 2 || !parts[0]) {
+        ctx.ui.notify("Usage: /ha-activate <provider> <name>", "warning");
+        return;
+      }
+      const [provider, name] = parts;
+      if (!isCredentialEntryKey(name)) {
+        ctx.ui.notify(`[HA] '${name}' is not a valid credential name.`, "warning");
+        return;
+      }
+      if (switchCred(provider, name, ctx)) {
+        updateStatusBar(ctx);
+        ctx.ui.notify(`[HA] Activated '${name}' for ${provider}`, "info");
+      } else {
+        ctx.ui.notify(`[HA] Credential '${name}' not found for provider '${provider}'.`, "warning");
+      }
+    },
+  });
+
+  // ─── /ha-clear [provider] [name|current] ─────────────────────────────────
+  pi.registerCommand("ha-clear", {
+    description: "Clear credentials: /ha-clear | /ha-clear <provider> | /ha-clear <provider> <name|current>",
+    handler: async (args, ctx) => {
+      if (!config?.credentials) {
+        ctx.ui.notify("[HA] No credentials stored.", "warning");
+        return;
+      }
+      const parts = (args || "").trim().split(/\s+/).filter(Boolean);
+
+      // /ha-clear — clear ALL credentials for ALL providers
+      if (parts.length === 0) {
+        const providerCount = Object.keys(config.credentials).length;
+        if (!await ctx.ui.confirm("Clear all HA credentials", `Delete all credentials for ${providerCount} provider(s)? This cannot be undone.`)) return;
+        config.credentials = {};
+        state.activeCredential.clear();
+        state.exhausted.clear();
+        saveConfig(config);
+        updateStatusBar(ctx);
+        ctx.ui.notify(`[HA] Cleared all credentials (${providerCount} provider(s)).`, "info");
+        return;
+      }
+
+      const provider = parts[0];
+      if (!config.credentials[provider]) {
+        ctx.ui.notify(`[HA] Provider '${provider}' not found.`, "warning");
+        return;
+      }
+
+      // /ha-clear <provider> — clear all credentials for a provider
+      if (parts.length === 1) {
+        const names = getCredentialNames(config.credentials[provider] as any);
+        if (!await ctx.ui.confirm("Clear provider credentials", `Delete all ${names.length} credential(s) for ${provider}?`)) return;
+        delete config.credentials[provider];
+        state.activeCredential.delete(provider);
+        for (const n of names) {
+          state.exhausted.delete(getCredentialExhaustionKey(provider, n));
+        }
+        saveConfig(config);
+        updateStatusBar(ctx);
+        ctx.ui.notify(`[HA] Cleared all credentials for ${provider} (${names.length} key(s)).`, "info");
+        return;
+      }
+
+      // /ha-clear <provider> current — clear the currently active credential
+      // /ha-clear <provider> <name>  — clear a specific credential by name
+      let name = parts[1];
+      if (name === "current") {
+        const activeName = state.activeCredential.get(provider);
+        if (!activeName) {
+          ctx.ui.notify(`[HA] No active credential for ${provider}.`, "warning");
+          return;
+        }
+        name = activeName;
+      }
+
+      const stored = config.credentials[provider];
+      if (!Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) {
+        ctx.ui.notify(`[HA] Credential '${name}' not found for ${provider}.`, "warning");
+        return;
+      }
+
+      if (!await ctx.ui.confirm("Clear credential", `Delete credential '${name}' for ${provider}?`)) return;
+
+      const wasDefault = getDefaultCredentialName(stored as any) === name;
+      delete stored[name];
+      state.exhausted.delete(getCredentialExhaustionKey(provider, name));
+
+      // Update active credential if we just deleted the active one
+      if (state.activeCredential.get(provider) === name) {
+        const remaining = getCredentialNames(stored as any);
+        if (remaining.length > 0) {
+          state.activeCredential.set(provider, remaining[0]);
+        } else {
+          state.activeCredential.delete(provider);
+        }
+      }
+
+      // Update default if needed
+      if (wasDefault) {
+        setDefaultCredentialName(stored as any);
+      } else {
+        ensureCredentialMeta(stored as any);
+      }
+
+      // Clean up empty provider
+      if (getCredentialNames(stored as any).length === 0) {
+        delete config.credentials[provider];
+      }
+
+      saveConfig(config);
+      updateStatusBar(ctx);
+      ctx.ui.notify(`[HA] Cleared credential '${name}' for ${provider}.`, "info");
+    },
   });
 
   pi.on("turn_start", async (event, ctx) => {
-    const branch = ctx.sessionManager.getBranch();
-    const lastMessage = branch.slice().reverse().find((e: any) => e.type === "message");
-    const content = lastMessage?.message?.content;
-    const text = typeof content === "string" ? content : JSON.stringify(content);
-
-    if (text && text.includes("MOCK_FAILOVER_TRIGGER")) {
-      const providerId = ctx.model?.provider;
-      if (providerId && config?.credentials?.[providerId]) {
-        const stored = config.credentials[providerId];
-        const names = Object.keys(stored);
-        const current = state.activeCredential.get(providerId) || "primary";
-        const next = names[(names.indexOf(current) + 1) % names.length];
-        
-        if (next && next !== current) {
-          if (switchCred(providerId, next)) {
-            ctx.ui.notify(`⚠️ MOCK FAILOVER: Switching ${providerId} to ${next}...`, "warning");
-            const actualMessage = branch.slice().reverse().find((e: any) => 
-              e.type === "message" && e.message.role === "user" && !JSON.stringify(e.message.content).includes("MOCK_FAILOVER_TRIGGER")
-            );
-            if (actualMessage) pi.sendUserMessage(actualMessage.message.content, { deliverAs: "steer" });
-            return;
-          }
-        }
-      }
-    }
+    updateStatusBar(ctx);
+    syncAuthToHa(ctx);              // Pick up any new credentials from auth.json
+    syncActiveCredentialFromAuth(); // Freshen active credential tokens in ha.json
   });
 
   pi.on("turn_end", async (event, ctx) => {
+    updateStatusBar(ctx);
     if (!config || !state.activeGroup || state.isRetrying) return;
     const msg = event.message;
     if (msg?.role !== "assistant") return;
@@ -252,20 +537,32 @@ export default function (pi: ExtensionAPI) {
     // Determine error type
     const errorMsg = msg.errorMessage || "";
     const errorLower = errorMsg.toLowerCase();
-    
-    // Capacity errors: no capacity, engine overloaded, etc.
-    const isCapacityError = errorLower.includes("capacity") || 
-                            errorLower.includes("no capacity") ||
-                            errorLower.includes("engine overloaded") ||
-                            errorLower.includes("overloaded");
-    
-    // Quota errors: rate limits, insufficient quota, etc.
-    const isQuotaError = errorMsg.includes("429") || 
-                         errorLower.includes("quota") || 
-                         errorLower.includes("rate limit") ||
-                         errorLower.includes("insufficient quota");
-    
-    if (!isCapacityError && !isQuotaError) return;
+
+    const isCapacityError =
+      errorLower.includes("capacity") ||
+      errorLower.includes("no capacity") ||
+      errorLower.includes("engine overloaded") ||
+      errorLower.includes("overloaded");
+
+    const isQuotaError =
+      errorMsg.includes("429") ||
+      errorLower.includes("quota") ||
+      errorLower.includes("rate limit") ||
+      errorLower.includes("usage limit") ||
+      errorLower.includes("insufficient quota");
+
+    if (!isCapacityError && !isQuotaError) {
+      if (errorMsg) {
+        ctx.ui.notify(`[HA] turn_end: non-HA error detected: ${errorMsg.slice(0, 80)}`, "info");
+      }
+      return;
+    }
+
+    const errorType = isCapacityError ? "CAPACITY" : "QUOTA";
+    ctx.ui.notify(
+      `[HA] turn_end: ${errorType} error from ${ctx.model?.provider}/${ctx.model?.id}: ${errorMsg.slice(0, 100)}`,
+      "warning",
+    );
 
     const providerId = ctx.model?.provider;
     if (!providerId) return;
@@ -273,116 +570,142 @@ export default function (pi: ExtensionAPI) {
     const group = config.groups[state.activeGroup];
     if (!group) return;
 
-    // Get error handling configuration
     const errorHandling = config.errorHandling || {};
-    const action: ErrorAction = isCapacityError 
-      ? (errorHandling.capacityErrorAction || "next_key_then_provider")
-      : (errorHandling.quotaErrorAction || "next_key_then_provider");
-    
-    const retryTimeoutMs = errorHandling.retryTimeoutMs || 300000; // Default 5 minutes
+    const action: ErrorAction = isCapacityError
+      ? errorHandling.capacityErrorAction || "next_key_then_provider"
+      : errorHandling.quotaErrorAction || "next_key_then_provider";
 
-    // Handle "stop" action
+    const retryTimeoutMs = errorHandling.retryTimeoutMs || 300000;
+
     if (action === "stop") {
       ctx.ui.notify(`🛑 ${isCapacityError ? "Capacity" : "Quota"} error. Stopping as configured.`, "error");
       return;
     }
 
-    // Handle "retry" action
     if (action === "retry") {
-      if (state.retryTimeoutId) {
-        clearTimeout(state.retryTimeoutId);
-      }
-      ctx.ui.notify(`⏱️ ${isCapacityError ? "Capacity" : "Quota"} error. Retrying in ${retryTimeoutMs}ms...`, "warning");
-      state.retryTimeoutId = setTimeout(() => {
-        retryTurn(ctx);
-      }, retryTimeoutMs);
+      if (state.retryTimeoutId) clearTimeout(state.retryTimeoutId);
+      ctx.ui.notify(
+        `⏱️ ${isCapacityError ? "Capacity" : "Quota"} error. Retrying in ${retryTimeoutMs}ms...`,
+        "warning",
+      );
+      state.retryTimeoutId = setTimeout(() => { retryTurn(ctx); }, retryTimeoutMs);
       return;
     }
 
-    // Determine what to try based on action
-    const shouldTryNextKey = action === "next_key_then_provider";
-    const shouldTryNextProvider = action === "next_provider" || action === "next_key_then_provider";
+    const { entry: currentGroupEntry, index: currentEntryIdx } = getCurrentGroupEntry(group, ctx.model);
+    const providerCooldown = currentGroupEntry?.cooldownMs || config.defaultCooldownMs || 3600000;
 
-    // Try next key/account for the same provider
-    if (shouldTryNextKey) {
-      const stored = config.credentials?.[providerId];
-      if (stored) {
-        const names = Object.keys(stored).filter(k => k !== "type");
-        const currentCred = state.activeCredential.get(providerId) || "primary";
-        
-        // Mark current credential as exhausted
-        const cooldown = config.defaultCooldownMs || 3600000;
-        state.exhausted.set(`${providerId}:${currentCred}`, { exhaustedAt: Date.now(), cooldownMs: cooldown });
+    // Mark current credential exhausted regardless of action
+    const stored = config.credentials?.[providerId];
+    if (stored) {
+      const names = getCredentialNames(stored as any);
+      const currentCred =
+        state.activeCredential.get(providerId) || getDefaultCredentialName(stored as any) || names[0];
+      if (currentCred) {
+        markExhausted(getCredentialExhaustionKey(providerId, currentCred), providerCooldown);
+      }
 
-        // Try to find next available credential
+      // Try next key/account for the same provider (only when action is next_key_then_provider)
+      if (action === "next_key_then_provider") {
         for (let i = 1; i <= names.length; i++) {
           const nextIdx = (names.indexOf(currentCred) + i) % names.length;
           const nextName = names[nextIdx];
-          
-          const exhaustState = state.exhausted.get(`${providerId}:${nextName}`);
-          const isStillExhausted = exhaustState && (Date.now() - exhaustState.exhaustedAt < exhaustState.cooldownMs);
-          
-          if (!isStillExhausted) {
-            if (switchCred(providerId, nextName)) {
-              ctx.ui.notify(`⚠️ ${isCapacityError ? "Capacity" : "Quota"} error. Switching ${providerId} account to ${nextName}...`, "warning");
+
+          if (!isExhausted(getCredentialExhaustionKey(providerId, nextName))) {
+            if (switchCred(providerId, nextName, ctx)) {
+              ctx.ui.notify(
+                `[HA] Switching ${providerId} credential: ${currentCred} -> ${nextName}`,
+                "warning",
+              );
+              updateStatusBar(ctx);
               retryTurn(ctx);
               return;
             }
           }
         }
+        ctx.ui.notify(`[HA] All credentials for ${providerId} exhausted, trying next provider`, "warning");
       }
     }
 
-    // Try next provider in the group
-    if (shouldTryNextProvider) {
-      const currentModelId = `${ctx.model?.provider}/${ctx.model?.id}`;
+    if (currentGroupEntry) {
+      markExhausted(getEntryExhaustionKey(currentGroupEntry.id), providerCooldown);
+    }
+
+    {
       const entries = group.entries;
-      
-      
-      const findEntryIndex = () => {
-          const idx = entries.findIndex(e => e.id === currentModelId || e.id === providerId);
-          return idx;
-      };
+      ctx.ui.notify(`[HA] Scanning ${entries.length} group entries for fallback provider`, "info");
 
-      const currentEntryIdx = findEntryIndex();
       for (let i = 1; i <= entries.length; i++) {
-          const nextEntryIdx = (currentEntryIdx + i) % entries.length;
-          const nextEntry = entries[nextEntryIdx];
-          
-          
-          let targetModel = ctx.modelRegistry.find(nextEntry.id, ""); 
-          if (!targetModel) {
-              
-              const allModels = ctx.modelRegistry.getAll();
-              targetModel = allModels.find(m => m.provider === nextEntry.id || `${m.provider}/${m.id}` === nextEntry.id);
-          }
+        const nextEntryIdx =
+          currentEntryIdx >= 0
+            ? (currentEntryIdx + i) % entries.length
+            : (i - 1) % entries.length;
+        const nextEntry = entries[nextEntryIdx];
 
-          if (targetModel) {
-              const nextProviderId = targetModel.provider;
-              
-              
-              switchCred(nextProviderId, "primary");
-              
-              if (await pi.setModel(targetModel)) {
-                  ctx.ui.notify(`🚨 All ${providerId} accounts exhausted. Failing over to ${nextProviderId}...`, "error");
-                  retryTurn(ctx);
-                  return;
-              }
-          }
+        if (isExhausted(getEntryExhaustionKey(nextEntry.id))) {
+          ctx.ui.notify(`[HA] Entry ${nextEntry.id} exhausted, skipping`, "info");
+          continue;
+        }
+
+        const targetModel = resolveGroupEntryModel(nextEntry.id, ctx.modelRegistry);
+        if (!targetModel) {
+          ctx.ui.notify(`[HA] Entry ${nextEntry.id}: model not found in registry`, "info");
+          continue;
+        }
+
+        if (targetModel.provider === ctx.model?.provider && targetModel.id === ctx.model?.id) {
+          ctx.ui.notify(`[HA] Entry ${nextEntry.id}: same as current model, skipping`, "info");
+          continue;
+        }
+
+        const nextProviderId = targetModel.provider;
+        const nextCredName = pickCredentialForProvider(nextProviderId);
+        const nextCooldown = nextEntry.cooldownMs || config.defaultCooldownMs || 3600000;
+
+        if (config.credentials?.[nextProviderId] && !nextCredName) {
+          ctx.ui.notify(`[HA] Entry ${nextEntry.id}: all credentials exhausted`, "info");
+          markExhausted(getEntryExhaustionKey(nextEntry.id), nextCooldown);
+          continue;
+        }
+
+        if (nextCredName && !switchCred(nextProviderId, nextCredName, ctx)) {
+          ctx.ui.notify(`[HA] Entry ${nextEntry.id}: credential switch failed`, "warning");
+          markExhausted(getEntryExhaustionKey(nextEntry.id), nextCooldown);
+          continue;
+        }
+
+        if (await pi.setModel(targetModel)) {
+          ctx.ui.notify(
+            `[HA] Failover: ${providerId} -> ${nextProviderId}/${targetModel.id} (cred: ${nextCredName || "default"})`,
+            "warning",
+          );
+          updateStatusBar(ctx);
+          retryTurn(ctx);
+          return;
+        }
+
+        ctx.ui.notify(`[HA] Entry ${nextEntry.id}: setModel() failed`, "warning");
+        markExhausted(getEntryExhaustionKey(nextEntry.id), nextCooldown);
       }
     }
 
-    // No fallback options worked
-    ctx.ui.notify(`❌ ${isCapacityError ? "Capacity" : "Quota"} error. No fallback options available.`, "error");
+    ctx.ui.notify(
+      `[HA] ${errorType} error — all fallback options exhausted. No providers available.`,
+      "error",
+    );
+    updateStatusBar(ctx);
   });
 
   function retryTurn(ctx: any) {
     state.isRetrying = true;
     const branch = ctx.sessionManager.getBranch();
-    const lastUser = branch.slice().reverse().find((e: any) => e.type === "message" && e.message.role === "user");
+    const lastUser = branch
+      .slice()
+      .reverse()
+      .find((e: any) => e.type === "message" && e.message.role === "user") as any;
     if (lastUser) {
-        pi.sendUserMessage(lastUser.message.content, { deliverAs: "steer" });
+      pi.sendUserMessage(lastUser.message.content, { deliverAs: "steer" });
     }
-    setTimeout(() => state.isRetrying = false, 5000);
+    setTimeout(() => (state.isRetrying = false), 5000);
   }
 }

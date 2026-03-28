@@ -2,26 +2,16 @@
 
 **pi-high-availability** automatically switches to fallback LLM providers when your primary provider hits quota limits or capacity constraints. Never get stuck waiting for quota resets again.
 
-## 🆕 What's New in v2.1.0
-
-**Configurable Error Handling** — You can now control how the extension responds to different types of errors:
-
-- **Capacity Errors** (e.g., "out of capacity", "engine overloaded"): These affect all accounts for a provider equally, so switching accounts doesn't help. Now you can choose to `stop`, `retry` after a timeout, or jump to `next_provider`.
-  
-- **Quota Errors** (e.g., "rate limit exceeded", "insufficient quota"): These are per-account, so switching to another OAuth key or API key may solve the problem. Choose from `stop`, `retry`, `next_provider`, or `next_key_then_provider` (default).
-
-Configure these in `/ha` under **⚙️ Settings** or directly in `ha.json` (see [Error Handling Configuration](#error-handling-configuration)).
-
 ## ✨ Features
 
-- **Unified HA Manager**: A beautiful interactive TUI (`/ha`) with accordion-style navigation to manage all your groups and credentials in one place.
-- **Automatic Multi-Tier Failover**: 
+- **Slash-Command Management**: Create groups, rename credentials, activate or clear accounts directly from the chat with `/ha`, `/ha-group`, `/ha-rename`, `/ha-activate`, and `/ha-clear`.
+- **Automatic Multi-Tier Failover**:
     1. **Account Failover**: Seamlessly switches between multiple accounts for the *same* provider.
     2. **Provider Failover**: Automatically jumps to the next provider in your group if all accounts for the current provider are exhausted.
 - **Exhaustion Tracking**: Intelligent cooldown management marks specific accounts or providers as "exhausted" on 429/capacity errors, preventing retries until they recover.
 - **Dynamic Provider Discovery**: Automatically detects all supported Pi providers (Anthropic, OpenAI, Gemini, Moonshot, Zai, etc.) without configuration.
-- **Group Management**: Create custom failover chains (e.g., "Fast Tier" → "Backup Tier") and rearrange model priority with simple keybindings.
-- **Credential Sync & Storage**: Automatically capture OAuth logins or manually add API keys for backup accounts.
+- **Group Management**: Create custom failover chains (e.g., "Fast Tier" → "Backup Tier") with a single command.
+- **Credential Sync & Storage**: Automatically captures OAuth logins and stores multiple accounts per provider.
 - **Smart Error Detection**: Distinguishes between quota errors and transient capacity issues, including full support for Google Gemini's internal retry patterns.
 
 ## 🚀 Quick Start
@@ -32,9 +22,7 @@ Configure these in `/ha` under **⚙️ Settings** or directly in `ha.json` (see
 pi install npm:pi-high-availability
 ```
 
-### 2. Open the Manager
-
-Run the High Availability manager to initialize your configuration:
+### 2. Check Status
 
 ```bash
 /ha
@@ -42,67 +30,78 @@ Run the High Availability manager to initialize your configuration:
 
 ### 3. Configure Your First Group
 
-1.  Select **📂 Groups**.
-2.  Add or select a group (e.g., `default`).
-3.  Add Model IDs (e.g., `anthropic/claude-3-5-sonnet`) to the group.
-4.  Use **`u`** and **`d`** keys to rearrange the priority.
+Use `/ha-group` to create a failover group with an ordered list of model IDs:
 
-## 🎮 The HA Manager (`/ha`)
+```
+/ha-group default anthropic/claude-3-5-sonnet google-gemini-cli/gemini-1.5-pro openai/gpt-4o
+```
 
-The interactive manager is your control center for high availability.
+This creates (or updates) a group named `default`, sets it as the active group, and configures the failover priority left-to-right.
 
-### Keyboard Navigation
+## 💬 Commands
 
-| Key | Action |
-|-----|--------|
-| `↑` / `↓` | Navigate items |
-| `Space` / `→` | Expand/collapse section or toggle item |
-| `Enter` | Select/activate item |
-| `x` / `d` / `Delete` | Delete currently selected item (with confirmation) |
-| `u` | Move item up (reorder) |
-| `d` | Move item down (reorder) |
-| `Esc` | Cancel / Exit |
+### `/ha`
+Show current HA status: active group, all groups with their model entries, credentials per provider, and any currently exhausted items.
 
-### 📂 Group Management
-*   **Add/Rename/Delete** groups.
-*   **Rearrange Priority**: Use **`u`** (up) and **`d`** (down) keys to set the failover order of models within a group.
-*   **Per-Entry Cooldown**: Set custom recovery times for specific models.
-*   **Delete Models**: Navigate to any model entry and press **`x`** to remove it from the group.
+```
+/ha
+```
 
-### 🔑 Credential Management
-*   **Auto-Sync**: Credentials from `/login` are automatically synced when you open `/ha`.
-*   **Add API Providers**: Use **"+ Add API Provider"** to manually add providers that use API keys.
-*   **Add API Keys**: For non-OAuth providers, add additional API keys as backups.
-*   **Account Priority**: Use **`u`** and **`d`** keys to decide which account is `primary` and which are `backup-1`, `backup-2`, etc.
-*   **Delete Keys**: Navigate to any key entry and press **`x`** to delete it.
-*   **Delete Providers**: Navigate to a provider header (e.g., `🔌 google-gemini-cli`) and press **`x`** to delete the entire provider and all its keys.
+### `/ha-group <name> <model-id1> [model-id2 ...]`
+Create or update a failover group. Sets the group as active and default immediately.
 
-### ⏱️ Settings
-*   **Default Cooldown**: Set the default recovery time (e.g., 3600000ms for 1 hour) for exhausted providers.
-*   **Default Group**: Choose which failover chain Pi uses when it starts up.
-*   **Error Handling**: Configure how different error types are handled:
-    *   **Capacity Error Action**: What to do when a provider reports "out of capacity" (doesn't help to switch accounts for the same provider)
-    *   **Quota Error Action**: What to do when a provider reports quota/rate limit exceeded (switching accounts may help)
-    *   **Retry Timeout**: How long to wait before retrying when using "retry" action (default: 300000ms = 5 minutes)
+```
+/ha-group fast anthropic/claude-3-5-sonnet openai/gpt-4o
+/ha-group fallback google-gemini-cli/gemini-1.5-pro
+```
+
+Model IDs use the `provider/model-id` format. Provider-only entries (e.g., `anthropic`) are also valid and resolve to any available model for that provider.
+
+### `/ha-rename <provider> <old-name> <new-name>`
+Rename a stored credential for a provider.
+
+```
+/ha-rename anthropic primary work-account
+/ha-rename anthropic backup-1 personal-account
+```
+
+### `/ha-activate <provider> <name>`
+Manually activate a specific credential for a provider, writing it to `auth.json` immediately. Useful for switching accounts without triggering a failover.
+
+```
+/ha-activate anthropic personal-account
+/ha-activate google-gemini-cli backup-1
+```
+
+### `/ha-clear [provider] [name|current]`
+Remove stored credentials from `ha.json`. Useful for purging stale or burned tokens. Also clears any exhaustion state for the removed credentials.
+
+```
+/ha-clear                          # Clear ALL credentials for all providers
+/ha-clear openai-codex             # Clear all credentials for a provider
+/ha-clear openai-codex backup-1    # Clear a specific credential by name
+/ha-clear openai-codex current     # Clear whichever credential is currently active
+```
+
+After clearing, run `/login` to re-authenticate and the extension will pick up the fresh token automatically.
 
 ## 🔍 How Failover Works
 
 ### The Failover Chain
 When a quota or capacity error is detected:
-1.  **Try Next Account**: The extension looks for another credential for the *same* provider (e.g., your second Google account).
+1.  **Try Next Account** *(only for `next_key_then_provider` action)*: The extension looks for another credential for the *same* provider (e.g., your second Google account).
 2.  **Mark Exhausted**: The current account is marked as exhausted and won't be used again until its cooldown expires.
-3.  **Switch Provider**: If all accounts for that provider are exhausted, the extension looks at the **Active Group** and switches to the next provider/model in the list.
-4.  **Automatic Retry**: Pi automatically resends your last message using the new provider and primary account, making the transition transparent.
+3.  **Switch Provider**: If all accounts for that provider are exhausted (or the action is `next_provider`), the extension looks at the **Active Group** and switches to the next provider/model in the list.
+4.  **Automatic Retry**: Pi automatically resends your last message using the new provider, making the transition transparent.
 
 ### Error Detection
 The extension detects:
 *   **Quota Errors**: HTTP 429, "rate limit", "insufficient quota", etc.
 *   **Capacity Errors**: "No capacity available", "Engine Overloaded", etc.
-*   **Gemini Awareness**: Correctly waits for Google's internal retry attempts before triggering a failover.
 
 ## ⚙️ Configuration Guide (`ha.json`)
 
-While you should use the `/ha` UI, you can also manually edit `~/.pi/agent/ha.json`:
+While you can use slash commands for most tasks, you can also manually edit `~/.pi/agent/ha.json`:
 
 ```json
 {
@@ -163,7 +162,7 @@ The following actions can be configured for both `capacityErrorAction` and `quot
 
 | Action | Description |
 |--------|-------------|
-| `stop` | Stop the process and display the error (default if pi-high-availability is not installed) |
+| `stop` | Stop the process and display the error |
 | `retry` | Wait for `retryTimeoutMs` milliseconds, then retry the same request |
 | `next_provider` | Immediately switch to the next provider in the current group |
 | `next_key_then_provider` | Try the next account/key for the current provider, then move to next provider if all exhausted (default) |
