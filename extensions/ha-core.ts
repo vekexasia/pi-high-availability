@@ -105,8 +105,12 @@ export function countActiveExhausted(
   now: number = Date.now(),
 ): number {
   let count = 0;
-  for (const [, entry] of exhausted) {
-    if (now - entry.exhaustedAt < entry.cooldownMs) count++;
+  for (const [key, entry] of exhausted) {
+    if (now - entry.exhaustedAt < entry.cooldownMs) {
+      count++;
+    } else {
+      exhausted.delete(key);
+    }
   }
   return count;
 }
