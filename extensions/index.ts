@@ -12,6 +12,7 @@ import {
   getCredentialNames,
   getDefaultCredentialName,
   isCredentialEntryKey,
+  isReservedCredentialName,
   normalizeCredentialProviders,
   setDefaultCredentialName,
 } from "./credentialMeta";
@@ -301,8 +302,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      const reserved = ["type", "__meta", "__proto__", "constructor", "prototype"];
-      if (reserved.includes(newName)) {
+      if (isReservedCredentialName(newName)) {
         ctx.ui.notify(`[HA] '${newName}' is a reserved name.`, "warning");
         return;
       }

@@ -4,8 +4,12 @@ export type ProviderCredentials = Record<string, any> & {
   };
 };
 
+export function isReservedCredentialName(name: string): boolean {
+  return name === "type" || name === "__meta" || name === "prototype" || name.startsWith("__") || name in Object.prototype;
+}
+
 export function isCredentialEntryKey(name: string) {
-  return name !== "type" && name !== "__meta";
+  return !isReservedCredentialName(name);
 }
 
 export function getCredentialNames(creds?: ProviderCredentials | null): string[] {

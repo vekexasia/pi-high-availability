@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   isCredentialEntryKey,
+  isReservedCredentialName,
   getCredentialNames,
   getDefaultCredentialName,
   ensureCredentialMeta,
@@ -24,10 +25,46 @@ describe("isCredentialEntryKey", () => {
     expect(isCredentialEntryKey("__meta")).toBe(false);
   });
 
-  it("returns true for other dunder keys (known gap)", () => {
-    // Documents current behavior — __proto__ is NOT filtered
-    expect(isCredentialEntryKey("__proto__")).toBe(true);
-    expect(isCredentialEntryKey("constructor")).toBe(true);
+  it("returns false for prototype-polluting keys", () => {
+    expect(isCredentialEntryKey("__proto__")).toBe(false);
+    expect(isCredentialEntryKey("constructor")).toBe(false);
+    expect(isCredentialEntryKey("prototype")).toBe(false);
+    expect(isCredentialEntryKey("toString")).toBe(false);
+    expect(isCredentialEntryKey("valueOf")).toBe(false);
+    expect(isCredentialEntryKey("hasOwnProperty")).toBe(false);
+  });
+});
+
+// ─── isReservedCredentialName ────────────────────────────────────────────────
+
+describe("isReservedCredentialName", () => {
+  it("returns false for normal credential names", () => {
+    expect(isReservedCredentialName("primary")).toBe(false);
+    expect(isReservedCredentialName("backup-1")).toBe(false);
+    expect(isReservedCredentialName("work")).toBe(false);
+  });
+
+  it("returns true for 'type'", () => {
+    expect(isReservedCredentialName("type")).toBe(true);
+  });
+
+  it("returns true for '__meta'", () => {
+    expect(isReservedCredentialName("__meta")).toBe(true);
+  });
+
+  it("returns true for any dunder key", () => {
+    expect(isReservedCredentialName("__proto__")).toBe(true);
+    expect(isReservedCredentialName("__defineGetter__")).toBe(true);
+    expect(isReservedCredentialName("__lookupSetter__")).toBe(true);
+  });
+
+  it("returns true for Object.prototype keys", () => {
+    expect(isReservedCredentialName("constructor")).toBe(true);
+    expect(isReservedCredentialName("prototype")).toBe(true);
+    expect(isReservedCredentialName("toString")).toBe(true);
+    expect(isReservedCredentialName("valueOf")).toBe(true);
+    expect(isReservedCredentialName("hasOwnProperty")).toBe(true);
+    expect(isReservedCredentialName("isPrototypeOf")).toBe(true);
   });
 });
 
