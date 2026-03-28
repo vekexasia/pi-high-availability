@@ -94,7 +94,7 @@ function syncAuthToHa(ctx?: any) {
     if (!foundName) {
       const existingNames = getCredentialNames(stored as any);
       const name = determineNewCredentialName(existingNames);
-      const newCred = JSON.parse(JSON.stringify(creds));
+      const newCred = structuredClone(creds);
       const credType = determineCredentialType(creds as any);
       if (credType) newCred.type = credType;
 
@@ -140,7 +140,7 @@ function syncActiveCredentialFromAuth(): boolean {
     if (!activeName || !stored[activeName]) continue;
 
     // Overwrite token fields with fresh data; preserve our metadata fields (type)
-    const fresh = JSON.parse(JSON.stringify(currentAuth));
+    const fresh = structuredClone(currentAuth);
     const existing = stored[activeName];
     const merged = { ...existing, ...fresh };
     if (existing.type) merged.type = existing.type;
@@ -160,7 +160,7 @@ function switchCred(providerId: string, name: string, ctx?: any): boolean {
   if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
   const auth = loadAuthJson();
 
-  const credToSave = JSON.parse(JSON.stringify(stored[name]));
+  const credToSave = structuredClone(stored[name]);
   auth[providerId] = credToSave;
   saveAuthJson(auth);
   state.activeCredential.set(providerId, name);
