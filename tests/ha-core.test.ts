@@ -389,6 +389,38 @@ describe("pickCredentialForProvider", () => {
     activeCredential.set("anthropic", "primary");
     expect(pickCredentialForProvider("anthropic", creds, activeCredential, exhausted, now)).toBe("primary");
   });
+
+  it("returns undefined when entryId is provided and entry is exhausted", () => {
+    const creds = {
+      anthropic: {
+        primary: { key: "k1" },
+        __meta: { defaultName: "primary" },
+      },
+    };
+    exhausted.set("entry:anthropic/claude-3", { exhaustedAt: 9000, cooldownMs: 5000 });
+    expect(pickCredentialForProvider("anthropic", creds, activeCredential, exhausted, now, "anthropic/claude-3")).toBeUndefined();
+  });
+
+  it("returns credential normally when entryId is provided but not exhausted", () => {
+    const creds = {
+      anthropic: {
+        primary: { key: "k1" },
+        __meta: { defaultName: "primary" },
+      },
+    };
+    expect(pickCredentialForProvider("anthropic", creds, activeCredential, exhausted, now, "anthropic/claude-3")).toBe("primary");
+  });
+
+  it("ignores entry exhaustion when entryId is not provided", () => {
+    const creds = {
+      anthropic: {
+        primary: { key: "k1" },
+        __meta: { defaultName: "primary" },
+      },
+    };
+    exhausted.set("entry:anthropic/claude-3", { exhaustedAt: 9000, cooldownMs: 5000 });
+    expect(pickCredentialForProvider("anthropic", creds, activeCredential, exhausted, now)).toBe("primary");
+  });
 });
 
 // ─── findMatchingCredentialName ──────────────────────────────────────────────

@@ -205,12 +205,14 @@ function markExhausted(key: string, cooldownMs: number) {
   markExhaustedCore(state.exhausted, key, cooldownMs);
 }
 
-function pickCredentialForProvider(providerId: string) {
+function pickCredentialForProvider(providerId: string, entryId?: string) {
   return pickCredentialForProviderCore(
     providerId,
     config?.credentials,
     state.activeCredential,
     state.exhausted,
+    Date.now(),
+    entryId,
   );
 }
 
@@ -631,7 +633,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         const nextProviderId = targetModel.provider;
-        const nextCredName = pickCredentialForProvider(nextProviderId);
+        const nextCredName = pickCredentialForProvider(nextProviderId, nextEntry.id);
         const nextCooldown = nextEntry.cooldownMs || config.defaultCooldownMs || 3600000;
 
         if (config.credentials?.[nextProviderId] && !nextCredName) {

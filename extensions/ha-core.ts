@@ -151,7 +151,13 @@ export function pickCredentialForProvider(
   activeCredential: Map<string, string>,
   exhausted: Map<string, ExhaustionEntry>,
   now: number = Date.now(),
+  entryId?: string,
 ): string | undefined {
+  // If the group entry itself is exhausted, no credential can help
+  if (entryId && isExhausted(exhausted, getEntryExhaustionKey(entryId), now)) {
+    return undefined;
+  }
+
   const stored = credentials?.[providerId];
   if (!stored) return undefined;
 
