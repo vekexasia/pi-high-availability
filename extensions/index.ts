@@ -485,6 +485,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_start", async (event, ctx) => {
+    state.isRetrying = false;       // Reset retry guard at turn boundary
     updateStatusBar(ctx);
     syncAuthToHa(ctx);              // Pick up any new credentials from auth.json
     syncActiveCredentialFromAuth(); // Freshen active credential tokens in ha.json
@@ -648,14 +649,21 @@ export default function (pi: ExtensionAPI) {
 
   function retryTurn(ctx: any) {
     state.isRetrying = true;
-    const branch = ctx.sessionManager.getBranch();
-    const lastUser = branch
-      .slice()
-      .reverse()
-      .find((e: any) => e.type === "message" && e.message.role === "user") as any;
-    if (lastUser) {
-      pi.sendUserMessage(lastUser.message.content, { deliverAs: "steer" });
+    try {
+      const branch = ctx.sessionManager.getBranch();
+      const lastUser = branch
+        .slice()
+        .reverse()
+        .find((e: any) => e.type === "message" && e.message.role === "user") as any;
+      if (lastUser) {
+        pi.sendUserMessage(lastUser.message.content, { deliverAs: "steer" });
+      } else {
+        ctx.ui.notify("[HA] No user message found to retry.", "warning");
+        state.isRetrying = false;
+      }
+    } catch (err: any) {
+      ctx.ui.notify(`[HA] Retry failed: ${err?.message || err}`, "error");
+      state.isRetrying = false;
     }
-    setTimeout(() => (state.isRetrying = false), 5000);
   }
 }
