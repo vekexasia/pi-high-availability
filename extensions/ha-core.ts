@@ -176,14 +176,25 @@ export function pickCredentialForProvider(
 
 // ─── Credential Matching (syncAuthToHa logic) ───────────────────────────────
 
+export function credentialFingerprint(cred: Record<string, any>): string {
+  const filtered: Record<string, any> = {};
+  for (const [k, v] of Object.entries(cred)) {
+    if (k !== "type" && k !== "__meta") {
+      filtered[k] = v;
+    }
+  }
+  return JSON.stringify(filtered);
+}
+
 export function findMatchingCredentialName(
   stored: Record<string, any>,
   authCreds: Record<string, any>,
 ): string | null {
+  const authFingerprint = credentialFingerprint(authCreds);
   for (const [name, existing] of Object.entries(stored)) {
     if (!isCredentialEntryKey(name)) continue;
-    if (authCreds.refresh && authCreds.refresh === existing?.refresh) return name;
-    if (authCreds.key && authCreds.key === existing?.key) return name;
+    if (typeof existing !== "object" || existing === null) continue;
+    if (credentialFingerprint(existing) === authFingerprint) return name;
   }
   return null;
 }

@@ -10,6 +10,7 @@ import {
   resolveGroupEntryModel,
   pickCredentialForProvider,
   findMatchingCredentialName,
+  credentialFingerprint,
   determineNewCredentialName,
   determineCredentialType,
   type ExhaustionEntry,
@@ -464,12 +465,34 @@ describe("findMatchingCredentialName", () => {
     expect(findMatchingCredentialName({}, { key: "sk-123" })).toBeNull();
   });
 
-  it("returns null when auth has no key/refresh (known gap #7)", () => {
+  it("matches credential with access_token (was gap #7)", () => {
     const stored = {
       primary: { access_token: "at-123" },
     };
-    // Credential uses access_token, but matching only checks refresh/key
-    expect(findMatchingCredentialName(stored, { access_token: "at-123" })).toBeNull();
+    expect(findMatchingCredentialName(stored, { access_token: "at-123" })).toBe("primary");
+  });
+});
+
+// ─── credentialFingerprint ─────────────────────────────────────────────────
+
+describe("credentialFingerprint", () => {
+  it("strips type and __meta fields", () => {
+    expect(credentialFingerprint({ key: "sk-1", type: "api_key", __meta: { x: 1 } })).toBe(
+      JSON.stringify({ key: "sk-1" }),
+    );
+  });
+
+  it("produces stable JSON for the same object", () => {
+    const cred = { refresh: "t1", key: "k1" };
+    expect(credentialFingerprint(cred)).toBe(credentialFingerprint(cred));
+  });
+
+  it("different credentials produce different fingerprints", () => {
+    expect(credentialFingerprint({ key: "sk-1" })).not.toBe(credentialFingerprint({ key: "sk-2" }));
+  });
+
+  it("returns empty JSON object when all fields are stripped", () => {
+    expect(credentialFingerprint({ type: "oauth", __meta: {} })).toBe(JSON.stringify({}));
   });
 });
 
