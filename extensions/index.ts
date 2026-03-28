@@ -5,6 +5,7 @@
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { readFileSync, writeFileSync } from "fs";
+import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -64,24 +65,23 @@ function updateStatusBar(ctx?: any) {
 
 let config: HaConfig | null = null;
 
-function loadAuthJson() {
-  try { return JSON.parse(readFileSync(AUTH_PATH, "utf-8")); }
+async function loadAuthJson(): Promise<any> {
+  try { return JSON.parse(await readFile(AUTH_PATH, "utf-8")); }
   catch { return {}; }
 }
 
-function saveAuthJson(auth: any) {
-  writeFileSync(AUTH_PATH, JSON.stringify(auth, null, 2), "utf-8");
+async function saveAuthJson(auth: any): Promise<void> {
+  await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf-8");
 }
 
-function saveConfig(cfg: HaConfig) {
+async function saveConfig(cfg: HaConfig): Promise<void> {
   normalizeCredentialProviders(cfg.credentials as any);
   config = cfg;
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
 }
 
-function syncAuthToHa(ctx?: any) {
-  if (!config) return;
-  const auth = loadAuthJson();
+function syncAuthToHa(auth: any, ctx?: any): boolean {
+  if (!config) return false;
   if (!config.credentials) config.credentials = {};
   let changed = false;
 
@@ -121,16 +121,16 @@ function syncAuthToHa(ctx?: any) {
       state.activeCredential.set(providerId, foundName);
     }
   }
-  if (changed) saveConfig(config);
+  return changed;
 }
 
 /**
  * Freshen the active ha.json credential entry with the latest tokens from auth.json.
  * Called on every turn_start so that pi's silently-refreshed OAuth tokens are never stale in ha.json.
  */
-function syncActiveCredentialFromAuth(): boolean {
+async function syncActiveCredentialFromAuth(): Promise<boolean> {
   if (!config?.credentials) return false;
-  const auth = loadAuthJson();
+  const auth = await loadAuthJson();
   let changed = false;
 
   for (const [providerId, currentAuth] of Object.entries(auth)) {
@@ -152,18 +152,18 @@ function syncActiveCredentialFromAuth(): boolean {
     }
   }
 
-  if (changed) saveConfig(config);
+  if (changed) await saveConfig(config!);
   return changed;
 }
 
-function switchCred(providerId: string, name: string, ctx?: any): boolean {
+async function switchCred(providerId: string, name: string, ctx?: any): Promise<boolean> {
   const stored = config?.credentials?.[providerId];
   if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
-  const auth = loadAuthJson();
+  const auth = await loadAuthJson();
 
   const credToSave = structuredClone(stored[name]);
   auth[providerId] = credToSave;
-  saveAuthJson(auth);
+  await saveAuthJson(auth);
   state.activeCredential.set(providerId, name);
 
   // Force pi to re-read auth.json into memory.
@@ -174,9 +174,8 @@ function switchCred(providerId: string, name: string, ctx?: any): boolean {
   return true;
 }
 
-function updateActiveCredentialsFromAuth() {
+function updateActiveCredentialsFromAuth(auth: any) {
   if (!config?.credentials) return;
-  const auth = loadAuthJson();
 
   for (const [providerId, currentAuth] of Object.entries(auth)) {
     const stored = config.credentials[providerId];
@@ -222,8 +221,19 @@ export default function (pi: ExtensionAPI) {
     config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     normalizeCredentialProviders(config?.credentials as any);
     if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
-    syncAuthToHa();
-    updateActiveCredentialsFromAuth();
+
+    // Inline sync read of auth.json (loadAuthJson is now async, can't use it here)
+    let startupAuth: any = {};
+    try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")); } catch {}
+
+    // syncAuthToHa now accepts auth param and returns changed boolean
+    if (syncAuthToHa(startupAuth)) {
+      normalizeCredentialProviders(config!.credentials as any);
+      writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+    }
+
+    // updateActiveCredentialsFromAuth now accepts auth param
+    updateActiveCredentialsFromAuth(startupAuth);
   } catch (e: any) {
     if (e.code !== "ENOENT") {
       console.error(`[HA] Failed to load ha.json: ${e.message}`);
@@ -245,7 +255,8 @@ export default function (pi: ExtensionAPI) {
         );
         return;
       }
-      syncAuthToHa(ctx);
+      const auth = await loadAuthJson();
+      if (syncAuthToHa(auth, ctx)) await saveConfig(config);
 
       const lines: string[] = [];
       lines.push(`Active Group: ${state.activeGroup || "none"}`);
@@ -339,7 +350,7 @@ export default function (pi: ExtensionAPI) {
         state.activeCredential.set(provider, newName);
       }
 
-      saveConfig(config);
+      await saveConfig(config);
       ctx.ui.notify(`[HA] Renamed ${provider}: ${oldName} → ${newName}`, "info");
     },
   });
@@ -372,7 +383,7 @@ export default function (pi: ExtensionAPI) {
       state.activeGroup = name;
       config.defaultGroup = name;
 
-      saveConfig(config);
+      await saveConfig(config);
       updateStatusBar(ctx);
       ctx.ui.notify(
         `[HA] Group '${name}' set with ${entries.length} model(s): ${modelIds.join(", ")}`,
@@ -395,7 +406,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`[HA] '${name}' is not a valid credential name.`, "warning");
         return;
       }
-      if (switchCred(provider, name, ctx)) {
+      if (await switchCred(provider, name, ctx)) {
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Activated '${name}' for ${provider}`, "info");
       } else {
@@ -421,7 +432,7 @@ export default function (pi: ExtensionAPI) {
         config.credentials = {};
         state.activeCredential.clear();
         state.exhausted.clear();
-        saveConfig(config);
+        await saveConfig(config);
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials (${providerCount} provider(s)).`, "info");
         return;
@@ -442,7 +453,7 @@ export default function (pi: ExtensionAPI) {
         for (const n of names) {
           state.exhausted.delete(getCredentialExhaustionKey(provider, n));
         }
-        saveConfig(config);
+        await saveConfig(config);
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials for ${provider} (${names.length} key(s)).`, "info");
         return;
@@ -494,7 +505,7 @@ export default function (pi: ExtensionAPI) {
         delete config.credentials[provider];
       }
 
-      saveConfig(config);
+      await saveConfig(config);
       updateStatusBar(ctx);
       ctx.ui.notify(`[HA] Cleared credential '${name}' for ${provider}.`, "info");
     },
@@ -507,8 +518,9 @@ export default function (pi: ExtensionAPI) {
     }
     state.isRetrying = false;       // Reset retry guard at turn boundary
     updateStatusBar(ctx);
-    syncAuthToHa(ctx);              // Pick up any new credentials from auth.json
-    syncActiveCredentialFromAuth(); // Freshen active credential tokens in ha.json
+    const auth = await loadAuthJson();
+    if (syncAuthToHa(auth, ctx)) await saveConfig(config!); // Pick up any new credentials from auth.json
+    await syncActiveCredentialFromAuth();                    // Freshen active credential tokens in ha.json
   });
 
   pi.on("turn_end", async (event, ctx) => {
@@ -595,7 +607,7 @@ export default function (pi: ExtensionAPI) {
           const nextName = names[nextIdx];
 
           if (!isExhausted(getCredentialExhaustionKey(providerId, nextName))) {
-            if (switchCred(providerId, nextName, ctx)) {
+            if (await switchCred(providerId, nextName, ctx)) {
               ctx.ui.notify(
                 `[HA] Switching ${providerId} credential: ${currentCred} -> ${nextName}`,
                 "warning",
@@ -651,7 +663,7 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        if (nextCredName && !switchCred(nextProviderId, nextCredName, ctx)) {
+        if (nextCredName && !await switchCred(nextProviderId, nextCredName, ctx)) {
           ctx.ui.notify(`[HA] Entry ${nextEntry.id}: credential switch failed`, "warning");
           markExhausted(getEntryExhaustionKey(nextEntry.id), nextCooldown);
           continue;
