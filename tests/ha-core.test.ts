@@ -30,7 +30,7 @@ describe("classifyError", () => {
   });
 
   // Capacity errors
-  it("detects 'capacity' keyword", () => {
+  it("detects 'no capacity'", () => {
     expect(classifyError("No capacity available")).toBe("capacity");
   });
 
@@ -38,8 +38,24 @@ describe("classifyError", () => {
     expect(classifyError("Engine overloaded, please retry")).toBe("capacity");
   });
 
-  it("detects 'overloaded' (case-insensitive)", () => {
+  it("detects 'server is overloaded' (case-insensitive)", () => {
     expect(classifyError("Server is OVERLOADED")).toBe("capacity");
+  });
+
+  it("detects HTTP 503", () => {
+    expect(classifyError("HTTP 503 Service Unavailable")).toBe("capacity");
+  });
+
+  it("detects 'service temporarily unavailable'", () => {
+    expect(classifyError("Service temporarily unavailable")).toBe("capacity");
+  });
+
+  it("detects 'server is overloaded'", () => {
+    expect(classifyError("Server is overloaded")).toBe("capacity");
+  });
+
+  it("detects 'service overloaded'", () => {
+    expect(classifyError("Service overloaded")).toBe("capacity");
   });
 
   it("detects 'no capacity'", () => {
@@ -67,20 +83,38 @@ describe("classifyError", () => {
     expect(classifyError("Insufficient quota for this request")).toBe("quota");
   });
 
+  it("detects 'rate_limit'", () => {
+    expect(classifyError("rate_limit_exceeded")).toBe("quota");
+  });
+
+  it("detects 'resource_exhausted'", () => {
+    expect(classifyError("resource_exhausted")).toBe("quota");
+  });
+
+  it("detects 'too many requests'", () => {
+    expect(classifyError("Too many requests")).toBe("quota");
+  });
+
   // Priority: capacity wins when both match
   it("returns 'capacity' when both capacity and quota signals present", () => {
-    expect(classifyError("429 overloaded")).toBe("capacity");
+    expect(classifyError("429 engine overloaded")).toBe("capacity");
   });
 
-  // Known false positive cases (documents current behavior)
-  it("false positive: '429' in non-status context", () => {
-    // This IS detected as quota - known issue #14
-    expect(classifyError("processed 429 items")).toBe("quota");
+  // Fixed false positives (issue #14)
+  it("does not match '429' without word boundary (e.g. '4291')", () => {
+    expect(classifyError("error code 4291")).toBeNull();
   });
 
-  it("false positive: 'overloaded' in generic context", () => {
-    // This IS detected as capacity - known issue #14
-    expect(classifyError("function is overloaded with parameters")).toBe("capacity");
+  it("does not match '429' in non-status context", () => {
+    expect(classifyError("processed 429 items")).toBeNull();
+  });
+
+  it("does not match bare 'overloaded' without server/service context", () => {
+    expect(classifyError("function is overloaded with parameters")).toBeNull();
+  });
+
+  it("does not match bare 'capacity' (e.g. 'capacity planning')", () => {
+    expect(classifyError("capacity planning for Q3")).toBeNull();
   });
 });
 

@@ -46,20 +46,27 @@ export function classifyError(errorMsg: string): "capacity" | "quota" | null {
   if (!errorMsg) return null;
   const lower = errorMsg.toLowerCase();
 
+  // Capacity patterns (checked first — higher priority)
   const isCapacity =
-    lower.includes("capacity") ||
     lower.includes("no capacity") ||
     lower.includes("engine overloaded") ||
-    lower.includes("overloaded");
-
-  const isQuota =
-    errorMsg.includes("429") ||
-    lower.includes("quota") ||
-    lower.includes("rate limit") ||
-    lower.includes("usage limit") ||
-    lower.includes("insufficient quota");
+    /\b503\b/.test(errorMsg) ||
+    lower.includes("service temporarily unavailable") ||
+    /\b(server|service)\s+(is\s+)?overloaded\b/.test(lower);
 
   if (isCapacity) return "capacity";
+
+  // Quota patterns
+  const isQuota =
+    /\b429(?!\d)(?!\s+[a-z])/.test(errorMsg) ||
+    lower.includes("quota") ||
+    lower.includes("rate limit") ||
+    lower.includes("rate_limit") ||
+    lower.includes("usage limit") ||
+    lower.includes("insufficient quota") ||
+    lower.includes("resource_exhausted") ||
+    lower.includes("too many requests");
+
   if (isQuota) return "quota";
   return null;
 }
