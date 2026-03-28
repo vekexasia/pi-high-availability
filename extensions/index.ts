@@ -684,8 +684,12 @@ export default function (pi: ExtensionAPI) {
         if (Array.isArray(content)) {
           const textOnly = content.filter((b: any) => b.type === "text");
           if (textOnly.length < content.length) {
-            ctx.ui.notify("[HA] Images stripped from retry to avoid doubling token costs.", "info");
-            content = textOnly.length > 0 ? textOnly : content; // Keep images if there's no text
+            if (textOnly.length > 0) {
+              content = textOnly;
+              ctx.ui.notify("[HA] Images stripped from retry to avoid doubling token costs.", "info");
+            } else {
+              ctx.ui.notify("[HA] Retrying image-only message — images cannot be stripped.", "warning");
+            }
           }
         }
         pi.sendUserMessage(content, { deliverAs: "steer" });
