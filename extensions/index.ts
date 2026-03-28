@@ -221,7 +221,11 @@ export default function (pi: ExtensionAPI) {
     if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
     syncAuthToHa();
     updateActiveCredentialsFromAuth();
-  } catch {}
+  } catch (e: any) {
+    if (e.code !== "ENOENT") {
+      console.error(`[HA] Failed to load ha.json: ${e.message}`);
+    }
+  }
 
   pi.on("session_start", async (_event, ctx) => {
     updateStatusBar(ctx);
