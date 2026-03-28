@@ -47,6 +47,7 @@ const state = {
   activeCredential: new Map<string, string>(),
   retryTimeoutId: null as NodeJS.Timeout | null,
   lastStatusCtx: null as any,
+  retriesThisTurn: 0,
 };
 
 function updateStatusBar(ctx?: any) {
@@ -485,6 +486,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_start", async (event, ctx) => {
+    // Only reset retry counter if we're NOT in a retry cycle
+    if (!state.isRetrying) {
+      state.retriesThisTurn = 0;
+    }
     state.isRetrying = false;       // Reset retry guard at turn boundary
     updateStatusBar(ctx);
     syncAuthToHa(ctx);              // Pick up any new credentials from auth.json
@@ -502,6 +507,7 @@ export default function (pi: ExtensionAPI) {
     const errorType = classifyError(errorMsg);
 
     if (!errorType) {
+      state.retriesThisTurn = 0;  // Reset on successful turn
       if (errorMsg) {
         ctx.ui.notify(`[HA] turn_end: non-HA error detected: ${errorMsg.slice(0, 80)}`, "info");
       }
@@ -532,6 +538,17 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(`🛑 ${isCapacityError ? "Capacity" : "Quota"} error. Stopping as configured.`, "error");
       return;
     }
+
+    const maxRetries = config.errorHandling?.maxRetriesPerTurn ?? 3;
+    if (state.retriesThisTurn >= maxRetries) {
+      ctx.ui.notify(
+        `[HA] Circuit breaker: max retries (${maxRetries}) reached for this turn. Stopping.`,
+        "error",
+      );
+      state.retriesThisTurn = 0;
+      return;
+    }
+    state.retriesThisTurn++;
 
     if (action === "retry") {
       if (state.retryTimeoutId) clearTimeout(state.retryTimeoutId);

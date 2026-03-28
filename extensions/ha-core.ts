@@ -32,6 +32,7 @@ export interface HaConfig {
     capacityErrorAction?: ErrorAction;
     quotaErrorAction?: ErrorAction;
     retryTimeoutMs?: number;
+    maxRetriesPerTurn?: number;
   };
 }
 
