@@ -4,8 +4,8 @@
 
 import type { Model } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { readFileSync, writeFileSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
+import { chmodSync, readFileSync, writeFileSync } from "fs";
+import { chmod, readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
 import {
@@ -58,7 +58,11 @@ const state = {
 
 function updateStatusBar(ctx?: any) {
   if (ctx?.ui) state.lastStatusUI = ctx.ui;
-  if (ctx?.model) state.lastStatusModel = { provider: ctx.model.provider, id: ctx.model.id };
+  if (ctx !== undefined) {
+    state.lastStatusModel = ctx.model
+      ? { provider: ctx.model.provider, id: ctx.model.id }
+      : null;
+  }
 
   const ui = state.lastStatusUI;
   if (!ui) return;
@@ -85,6 +89,7 @@ async function saveConfig(cfg: HaConfig): Promise<void> {
   normalizeCredentialProviders(cfg.credentials as any);
   config = cfg;
   await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+  await chmod(CONFIG_PATH, 0o600);
 }
 
 function syncAuthToHa(auth: any, ctx?: any): boolean {
@@ -239,6 +244,7 @@ export default function (pi: ExtensionAPI) {
     if (syncAuthToHa(startupAuth)) {
       normalizeCredentialProviders(config!.credentials as any);
       writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+      chmodSync(CONFIG_PATH, 0o600);
     }
 
     // updateActiveCredentialsFromAuth now accepts auth param
