@@ -182,6 +182,11 @@ async function switchCred(providerId: string, name: string, ctx?: any): Promise<
   // Force pi to re-read auth.json into memory.
   if (ctx?.modelRegistry?.authStorage?.reload) {
     ctx.modelRegistry.authStorage.reload();
+  } else if (ctx?.ui) {
+    ctx.ui.notify(
+      "[HA] Warning: pi's authStorage.reload() is unavailable — credential may not be active until pi restarts.",
+      "warning"
+    );
   }
 
   persistState();
