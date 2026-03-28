@@ -233,6 +233,7 @@ function pickCredentialForProvider(providerId: string, entryId?: string) {
 export default function (pi: ExtensionAPI) {
   try {
     config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+    try { chmodSync(CONFIG_PATH, 0o600); } catch {} // Tighten permissions on every startup
     normalizeCredentialProviders(config?.credentials as any);
     if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
 
