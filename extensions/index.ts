@@ -360,6 +360,14 @@ export default function (pi: ExtensionAPI) {
       const entries: HaGroupEntry[] = modelIds.map((id) => ({ id }));
       config.groups[name] = { name, entries };
 
+      // Validate model IDs and warn about unresolvable entries
+      for (const id of modelIds) {
+        const model = resolveGroupEntryModel(id, ctx.modelRegistry);
+        if (!model) {
+          ctx.ui.notify(`[HA] Warning: model '${id}' not found in registry`, "warning");
+        }
+      }
+
       // Set as active and default group
       state.activeGroup = name;
       config.defaultGroup = name;
