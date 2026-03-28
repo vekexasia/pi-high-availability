@@ -679,7 +679,16 @@ export default function (pi: ExtensionAPI) {
         .reverse()
         .find((e: any) => e.type === "message" && e.message.role === "user") as any;
       if (lastUser) {
-        pi.sendUserMessage(lastUser.message.content, { deliverAs: "steer" });
+        let content = lastUser.message.content;
+        // Strip image blocks to avoid doubling token costs on retry
+        if (Array.isArray(content)) {
+          const textOnly = content.filter((b: any) => b.type === "text");
+          if (textOnly.length < content.length) {
+            ctx.ui.notify("[HA] Images stripped from retry to avoid doubling token costs.", "info");
+            content = textOnly.length > 0 ? textOnly : content; // Keep images if there's no text
+          }
+        }
+        pi.sendUserMessage(content, { deliverAs: "steer" });
       } else {
         ctx.ui.notify("[HA] No user message found to retry.", "warning");
         state.isRetrying = false;
