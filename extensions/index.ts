@@ -708,10 +708,19 @@ export default function (pi: ExtensionAPI) {
           continue;
         }
 
-        const targetModel = resolveGroupEntryModel(nextEntry.id, ctx.modelRegistry);
+        let targetModel = resolveGroupEntryModel(nextEntry.id, ctx.modelRegistry);
         if (!targetModel) {
-          ctx.ui.notify(`[HA] Entry ${nextEntry.id}: model not found in registry`, "info");
-          continue;
+          // Model not in registry — may be unauthed. Try switching credentials first, then retry lookup.
+          const probeProviderId = nextEntry.id.includes("/") ? nextEntry.id.slice(0, nextEntry.id.indexOf("/")) : nextEntry.id;
+          const probeCredName = pickCredentialForProvider(probeProviderId, nextEntry.id);
+          if (probeCredName) {
+            await switchCred(probeProviderId, probeCredName, ctx);
+            targetModel = resolveGroupEntryModel(nextEntry.id, ctx.modelRegistry);
+          }
+          if (!targetModel) {
+            ctx.ui.notify(`[HA] Entry ${nextEntry.id}: model not found in registry (even after credential switch)`, "info");
+            continue;
+          }
         }
 
         if (targetModel.provider === ctx.model?.provider && targetModel.id === ctx.model?.id) {
