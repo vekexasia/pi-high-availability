@@ -56,9 +56,10 @@ function updateStatusBar(ctx?: any) {
   state.lastStatusCtx = c;
 
   const group = state.activeGroup || "none";
+  const model = c.model ? `${c.model.provider}/${c.model.id}` : "?";
   const exhaustedCount = countActiveExhausted(state.exhausted);
   const exhaustedStr = exhaustedCount > 0 ? ` | ${exhaustedCount} exhausted` : "";
-  c.ui.setStatus("ha", `HA: ${group}${exhaustedStr}`);
+  c.ui.setStatus("ha", `HA: ${group} (${model})${exhaustedStr}`);
 }
 
 let config: HaConfig | null = null;
