@@ -50,7 +50,7 @@ describe("classifyError", () => {
     expect(classifyError("Service temporarily unavailable")).toBe("capacity");
   });
 
-  it("detects 'server is overloaded'", () => {
+  it("detects 'server is overloaded' (with 'is')", () => {
     expect(classifyError("Server is overloaded")).toBe("capacity");
   });
 
@@ -58,7 +58,7 @@ describe("classifyError", () => {
     expect(classifyError("Service overloaded")).toBe("capacity");
   });
 
-  it("detects 'no capacity'", () => {
+  it("detects 'no capacity' (lowercase variant)", () => {
     expect(classifyError("no capacity for this model")).toBe("capacity");
   });
 
@@ -105,8 +105,16 @@ describe("classifyError", () => {
     expect(classifyError("error code 4291")).toBeNull();
   });
 
-  it("does not match '429' in non-status context", () => {
-    expect(classifyError("processed 429 items")).toBeNull();
+  it("matches bare '429' even in non-HTTP context (accepted tradeoff)", () => {
+    expect(classifyError("processed 429 items")).toBe("quota"); // bare 429 in error messages is almost always HTTP 429
+  });
+
+  it("detects '429' followed by lowercase word (e.g. 'from upstream')", () => {
+    expect(classifyError("Received status code 429 from upstream")).toBe("quota");
+  });
+
+  it("detects '429' followed by 'from server'", () => {
+    expect(classifyError("request failed with status 429 from server")).toBe("quota");
   });
 
   it("does not match bare 'overloaded' without server/service context", () => {

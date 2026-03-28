@@ -58,7 +58,7 @@ export function classifyError(errorMsg: string): "capacity" | "quota" | null {
 
   // Quota patterns
   const isQuota =
-    /\b429(?!\d)(?!\s+[a-z])/.test(errorMsg) ||
+    /\b429\b/.test(errorMsg) ||
     lower.includes("quota") ||
     lower.includes("rate limit") ||
     lower.includes("rate_limit") ||
