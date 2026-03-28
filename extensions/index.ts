@@ -15,22 +15,25 @@ import {
   normalizeCredentialProviders,
   setDefaultCredentialName,
 } from "./credentialMeta";
-
-type ErrorAction = "stop" | "retry" | "next_provider" | "next_key_then_provider";
-
-interface HaGroupEntry { id: string; cooldownMs?: number; }
-interface HaGroup { name: string; entries: HaGroupEntry[]; }
-interface HaConfig {
-  groups: Record<string, HaGroup>;
-  defaultGroup?: string;
-  defaultCooldownMs?: number;
-  credentials?: Record<string, Record<string, any>>;
-  errorHandling?: {
-    capacityErrorAction?: ErrorAction;
-    quotaErrorAction?: ErrorAction;
-    retryTimeoutMs?: number;
-  };
-}
+import {
+  classifyError,
+  countActiveExhausted,
+  determineCredentialType,
+  determineNewCredentialName,
+  findMatchingCredentialName,
+  getCredentialExhaustionKey,
+  getEntryExhaustionKey,
+  getCurrentGroupEntry,
+  isExhausted as isExhaustedCore,
+  markExhausted as markExhaustedCore,
+  pickCredentialForProvider as pickCredentialForProviderCore,
+  resolveGroupEntryModel,
+  type ErrorAction,
+  type ExhaustionEntry,
+  type HaConfig,
+  type HaGroup,
+  type HaGroupEntry,
+} from "./ha-core";
 
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "ha.json");
@@ -38,7 +41,7 @@ const AUTH_PATH = join(AGENT_DIR, "auth.json");
 
 const state = {
   activeGroup: null as string | null,
-  exhausted: new Map<string, { exhaustedAt: number; cooldownMs: number }>(),
+  exhausted: new Map<string, ExhaustionEntry>(),
   isRetrying: false,
   activeCredential: new Map<string, string>(),
   retryTimeoutId: null as NodeJS.Timeout | null,
@@ -51,9 +54,7 @@ function updateStatusBar(ctx?: any) {
   state.lastStatusCtx = c;
 
   const group = state.activeGroup || "none";
-  const exhaustedCount = [...state.exhausted.entries()].filter(
-    ([, s]) => Date.now() - s.exhaustedAt < s.cooldownMs,
-  ).length;
+  const exhaustedCount = countActiveExhausted(state.exhausted);
   const exhaustedStr = exhaustedCount > 0 ? ` | ${exhaustedCount} exhausted` : "";
   c.ui.setStatus("ha", `HA: ${group}${exhaustedStr}`);
 }
@@ -86,19 +87,14 @@ function syncAuthToHa(ctx?: any) {
     const stored = config.credentials[providerId];
     ensureCredentialMeta(stored as any);
 
-    let foundName: string | null = null;
-    for (const [name, existing] of Object.entries(stored)) {
-      if (!isCredentialEntryKey(name)) continue;
-      if ((creds as any).refresh && (creds as any).refresh === (existing as any).refresh) { foundName = name; break; }
-      if ((creds as any).key && (creds as any).key === (existing as any).key) { foundName = name; break; }
-    }
+    const foundName = findMatchingCredentialName(stored, creds as any);
 
     if (!foundName) {
       const existingNames = getCredentialNames(stored as any);
-      const name = existingNames.length === 0 ? "primary" : `backup-${existingNames.length}`;
+      const name = determineNewCredentialName(existingNames);
       const newCred = JSON.parse(JSON.stringify(creds));
-      if ((creds as any).refresh) newCred.type = "oauth";
-      else if ((creds as any).key) newCred.type = "api_key";
+      const credType = determineCredentialType(creds as any);
+      if (credType) newCred.type = credType;
 
       stored[name] = newCred;
       if (existingNames.length === 0) {
@@ -199,55 +195,21 @@ function updateActiveCredentialsFromAuth() {
   }
 }
 
-function getCredentialExhaustionKey(providerId: string, name: string) {
-  return `cred:${providerId}:${name}`;
-}
-
-function getEntryExhaustionKey(entryId: string) {
-  return `entry:${entryId}`;
-}
-
 function isExhausted(key: string) {
-  const exhaustState = state.exhausted.get(key);
-  return !!exhaustState && Date.now() - exhaustState.exhaustedAt < exhaustState.cooldownMs;
+  return isExhaustedCore(state.exhausted, key);
 }
 
 function markExhausted(key: string, cooldownMs: number) {
-  state.exhausted.set(key, { exhaustedAt: Date.now(), cooldownMs });
-}
-
-function getCurrentGroupEntry(group: HaGroup, model?: Model<any> | null) {
-  if (!model) return { entry: undefined as HaGroupEntry | undefined, index: -1 };
-  const currentModelId = `${model.provider}/${model.id}`;
-  const index = group.entries.findIndex((e) => e.id === currentModelId || e.id === model.provider);
-  return { entry: index >= 0 ? group.entries[index] : undefined, index };
-}
-
-function resolveGroupEntryModel(entryId: string, modelRegistry: any) {
-  const slashIndex = entryId.indexOf("/");
-  if (slashIndex !== -1) {
-    const provider = entryId.slice(0, slashIndex);
-    const modelId = entryId.slice(slashIndex + 1);
-    return modelRegistry.find(provider, modelId);
-  }
-
-  const allModels = modelRegistry.getAll();
-  return allModels.find((m: Model<any>) => m.provider === entryId);
+  markExhaustedCore(state.exhausted, key, cooldownMs);
 }
 
 function pickCredentialForProvider(providerId: string) {
-  const stored = config?.credentials?.[providerId];
-  if (!stored) return undefined;
-
-  const names = getCredentialNames(stored as any);
-  if (names.length === 0) return undefined;
-
-  const active = state.activeCredential.get(providerId);
-  const preferred = [active, getDefaultCredentialName(stored as any), ...names].filter(
-    (name, idx, arr): name is string => !!name && arr.indexOf(name) === idx,
+  return pickCredentialForProviderCore(
+    providerId,
+    config?.credentials,
+    state.activeCredential,
+    state.exhausted,
   );
-
-  return preferred.find((name) => !isExhausted(getCredentialExhaustionKey(providerId, name)));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -536,31 +498,19 @@ export default function (pi: ExtensionAPI) {
 
     // Determine error type
     const errorMsg = msg.errorMessage || "";
-    const errorLower = errorMsg.toLowerCase();
+    const errorType = classifyError(errorMsg);
 
-    const isCapacityError =
-      errorLower.includes("capacity") ||
-      errorLower.includes("no capacity") ||
-      errorLower.includes("engine overloaded") ||
-      errorLower.includes("overloaded");
-
-    const isQuotaError =
-      errorMsg.includes("429") ||
-      errorLower.includes("quota") ||
-      errorLower.includes("rate limit") ||
-      errorLower.includes("usage limit") ||
-      errorLower.includes("insufficient quota");
-
-    if (!isCapacityError && !isQuotaError) {
+    if (!errorType) {
       if (errorMsg) {
         ctx.ui.notify(`[HA] turn_end: non-HA error detected: ${errorMsg.slice(0, 80)}`, "info");
       }
       return;
     }
 
-    const errorType = isCapacityError ? "CAPACITY" : "QUOTA";
+    const isCapacityError = errorType === "capacity";
+    const errorLabel = isCapacityError ? "CAPACITY" : "QUOTA";
     ctx.ui.notify(
-      `[HA] turn_end: ${errorType} error from ${ctx.model?.provider}/${ctx.model?.id}: ${errorMsg.slice(0, 100)}`,
+      `[HA] turn_end: ${errorLabel} error from ${ctx.model?.provider}/${ctx.model?.id}: ${errorMsg.slice(0, 100)}`,
       "warning",
     );
 
@@ -690,7 +640,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     ctx.ui.notify(
-      `[HA] ${errorType} error — all fallback options exhausted. No providers available.`,
+      `[HA] ${errorLabel} error — all fallback options exhausted. No providers available.`,
       "error",
     );
     updateStatusBar(ctx);
