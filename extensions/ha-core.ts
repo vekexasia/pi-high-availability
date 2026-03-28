@@ -183,7 +183,7 @@ export function credentialFingerprint(cred: Record<string, any>): string {
       filtered[k] = v;
     }
   }
-  return JSON.stringify(filtered);
+  return JSON.stringify(filtered, Object.keys(filtered).sort());
 }
 
 export function findMatchingCredentialName(

@@ -482,9 +482,10 @@ describe("credentialFingerprint", () => {
     );
   });
 
-  it("produces stable JSON for the same object", () => {
-    const cred = { refresh: "t1", key: "k1" };
-    expect(credentialFingerprint(cred)).toBe(credentialFingerprint(cred));
+  it("produces same fingerprint regardless of key order", () => {
+    const a = { access_token: "tok", refresh_token: "ref" };
+    const b = { refresh_token: "ref", access_token: "tok" };
+    expect(credentialFingerprint(a)).toBe(credentialFingerprint(b));
   });
 
   it("different credentials produce different fingerprints", () => {
