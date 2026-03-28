@@ -471,6 +471,15 @@ describe("findMatchingCredentialName", () => {
     };
     expect(findMatchingCredentialName(stored, { access_token: "at-123" })).toBe("primary");
   });
+
+  it("matches existing entry even after OAuth access token refresh", () => {
+    const stored = {
+      primary: { refresh: "stable-refresh", access: "old-access", type: "oauth" },
+      __meta: { defaultName: "primary" },
+    };
+    // Simulate a token refresh: same refresh token, different access token
+    expect(findMatchingCredentialName(stored, { refresh: "stable-refresh", access: "new-access" })).toBe("primary");
+  });
 });
 
 // ─── credentialFingerprint ─────────────────────────────────────────────────
@@ -494,6 +503,12 @@ describe("credentialFingerprint", () => {
 
   it("returns empty JSON object when all fields are stripped", () => {
     expect(credentialFingerprint({ type: "oauth", __meta: {} })).toBe(JSON.stringify({}));
+  });
+
+  it("produces different fingerprints for same refresh but different access token", () => {
+    const a = { refresh: "r1", access: "old" };
+    const b = { refresh: "r1", access: "new" };
+    expect(credentialFingerprint(a)).not.toBe(credentialFingerprint(b));
   });
 });
 

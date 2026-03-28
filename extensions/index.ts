@@ -51,20 +51,23 @@ const state = {
   isRetrying: false,
   activeCredential: new Map<string, string>(),
   retryTimeoutId: null as NodeJS.Timeout | null,
-  lastStatusCtx: null as any,
+  lastStatusModel: null as { provider: string; id: string } | null,
+  lastStatusUI: null as any,
   retriesThisTurn: 0,
 };
 
 function updateStatusBar(ctx?: any) {
-  const c = ctx || state.lastStatusCtx;
-  if (!c?.ui) return;
-  state.lastStatusCtx = c;
+  if (ctx?.ui) state.lastStatusUI = ctx.ui;
+  if (ctx?.model) state.lastStatusModel = { provider: ctx.model.provider, id: ctx.model.id };
+
+  const ui = state.lastStatusUI;
+  if (!ui) return;
 
   const group = state.activeGroup || "none";
-  const model = c.model ? `${c.model.provider}/${c.model.id}` : "?";
+  const model = state.lastStatusModel ? `${state.lastStatusModel.provider}/${state.lastStatusModel.id}` : "?";
   const exhaustedCount = countActiveExhausted(state.exhausted);
   const exhaustedStr = exhaustedCount > 0 ? ` | ${exhaustedCount} exhausted` : "";
-  c.ui.setStatus("ha", `HA: ${group} (${model})${exhaustedStr}`);
+  ui.setStatus("ha", `HA: ${group} (${model})${exhaustedStr}`);
 }
 
 let config: HaConfig | null = null;
@@ -81,7 +84,7 @@ async function saveAuthJson(auth: any): Promise<void> {
 async function saveConfig(cfg: HaConfig): Promise<void> {
   normalizeCredentialProviders(cfg.credentials as any);
   config = cfg;
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
 }
 
 function syncAuthToHa(auth: any, ctx?: any): boolean {
@@ -165,7 +168,8 @@ async function switchCred(providerId: string, name: string, ctx?: any): Promise<
   if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
   const auth = await loadAuthJson();
 
-  const credToSave = structuredClone(stored[name]);
+  // Strip HA-internal metadata before writing to auth.json
+  const { type: _type, __meta: _meta, ...credToSave } = structuredClone(stored[name]);
   auth[providerId] = credToSave;
   await saveAuthJson(auth);
   state.activeCredential.set(providerId, name);
@@ -234,7 +238,7 @@ export default function (pi: ExtensionAPI) {
     // syncAuthToHa now accepts auth param and returns changed boolean
     if (syncAuthToHa(startupAuth)) {
       normalizeCredentialProviders(config!.credentials as any);
-      writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+      writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
     }
 
     // updateActiveCredentialsFromAuth now accepts auth param
@@ -280,6 +284,11 @@ export default function (pi: ExtensionAPI) {
         break; // Use the most recent entry only
       }
     }
+    // NOTE: pi's SessionManager is append-only — entries cannot be removed.
+    // ha-state entries will accumulate across persists. We only restore from
+    // the most recent entry (searched in reverse above), so stale entries are
+    // harmless but waste a small amount of session storage.
+    // If SessionManager gains a removeEntry() API in the future, prune here.
     updateStatusBar(ctx);
   });
 
@@ -298,6 +307,7 @@ export default function (pi: ExtensionAPI) {
       if (syncAuthToHa(auth, ctx)) await saveConfig(config);
 
       const lines: string[] = [];
+      lines.push("⚠️  ha.json stores credentials in plaintext at ~/.pi/agent/ha.json — keep this file private (chmod 600).");
       lines.push(`Active Group: ${state.activeGroup || "none"}`);
 
       // Groups
@@ -404,7 +414,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       if (!config) {
-        config = { groups: {}, credentials: {}, defaultCooldownMs: 5000 };
+        config = { groups: {}, credentials: {}, defaultCooldownMs: 3600000 };
       }
       const [name, ...modelIds] = parts;
       const entries: HaGroupEntry[] = modelIds.map((id) => ({ id }));

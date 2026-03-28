@@ -190,11 +190,19 @@ export function findMatchingCredentialName(
   stored: Record<string, any>,
   authCreds: Record<string, any>,
 ): string | null {
-  const authFingerprint = credentialFingerprint(authCreds);
+  // Phase 1: match on stable identity fields only (access tokens change on OAuth refresh)
   for (const [name, existing] of Object.entries(stored)) {
     if (!isCredentialEntryKey(name)) continue;
     if (typeof existing !== "object" || existing === null) continue;
-    if (credentialFingerprint(existing) === authFingerprint) return name;
+    if (authCreds.refresh && existing.refresh === authCreds.refresh) return name;
+    if (authCreds.key && existing.key === authCreds.key) return name;
+  }
+  // Phase 2: fallback full fingerprint match for unknown credential shapes
+  const authFp = credentialFingerprint(authCreds);
+  for (const [name, existing] of Object.entries(stored)) {
+    if (!isCredentialEntryKey(name)) continue;
+    if (typeof existing !== "object" || existing === null) continue;
+    if (credentialFingerprint(existing) === authFp) return name;
   }
   return null;
 }
