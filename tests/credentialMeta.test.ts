@@ -155,14 +155,12 @@ describe("getDefaultCredentialName", () => {
 // ─── ensureCredentialMeta ────────────────────────────────────────────────────
 
 describe("ensureCredentialMeta", () => {
-  it("returns nullish for null input (actually returns null due to cast)", () => {
-    // Note: the `as undefined` cast in the source means the type says undefined
-    // but the runtime value is null. This is a known quirk (see issue #16).
-    expect(ensureCredentialMeta(null)).toBeNull();
+  it("does not throw for null input", () => {
+    expect(() => ensureCredentialMeta(null)).not.toThrow();
   });
 
-  it("returns undefined for undefined input", () => {
-    expect(ensureCredentialMeta(undefined)).toBeUndefined();
+  it("does not throw for undefined input", () => {
+    expect(() => ensureCredentialMeta(undefined)).not.toThrow();
   });
 
   it("sets __meta.defaultName to the resolved default", () => {
@@ -193,8 +191,7 @@ describe("ensureCredentialMeta", () => {
 
   it("mutates the object in-place", () => {
     const creds: ProviderCredentials = { primary: { key: "k" } };
-    const result = ensureCredentialMeta(creds);
-    expect(result).toBe(creds); // same reference
+    ensureCredentialMeta(creds);
     expect(creds.__meta?.defaultName).toBe("primary");
   });
 

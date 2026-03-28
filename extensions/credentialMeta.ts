@@ -27,8 +27,8 @@ export function getDefaultCredentialName(creds?: ProviderCredentials | null): st
   return names[0];
 }
 
-export function ensureCredentialMeta(creds?: ProviderCredentials | null): ProviderCredentials | undefined {
-  if (!creds) return creds as undefined;
+export function ensureCredentialMeta(creds?: ProviderCredentials | null): void {
+  if (!creds) return;
 
   const defaultName = getDefaultCredentialName(creds);
   const meta = creds.__meta && typeof creds.__meta === "object" ? creds.__meta : {};
@@ -40,8 +40,6 @@ export function ensureCredentialMeta(creds?: ProviderCredentials | null): Provid
     delete nextMeta.defaultName;
     creds.__meta = nextMeta;
   }
-
-  return creds;
 }
 
 export function setDefaultCredentialName(creds: ProviderCredentials, name?: string) {
