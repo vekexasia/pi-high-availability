@@ -35,6 +35,7 @@ import {
   getCurrentGroupEntry,
   isExhausted as isExhaustedCore,
   markExhausted as markExhaustedCore,
+  mergeConfigFromDisk,
   pickCredentialForProvider as pickCredentialForProviderCore,
   resolveGroupEntryModel,
   type ErrorAction,
@@ -101,6 +102,19 @@ async function loadAuthJson(): Promise<AuthJson> {
 
 async function saveAuthJson(auth: AuthJson): Promise<void> {
   await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf-8");
+}
+
+function reloadConfigFromDisk(): void {
+  try {
+    const fresh = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as HaConfig;
+    if (!config) {
+      config = fresh;
+      return;
+    }
+    config = mergeConfigFromDisk(config, fresh);
+  } catch {
+    // Silently ignore — stale config is better than crashing
+  }
 }
 
 async function saveConfig(cfg: HaConfig): Promise<void> {
@@ -339,6 +353,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("ha", {
     description: "Show HA status (active group, credentials, exhaustion state)",
     handler: async (_, ctx) => {
+      reloadConfigFromDisk();
       if (!config) {
         ctx.ui.notify(
           "[HA] No configuration found. Create ~/.pi/agent/ha.json or use /ha-group.",
@@ -665,10 +680,16 @@ export default function (pi: ExtensionAPI) {
       state.retriesThisTurn = 0;
     }
     state.isRetrying = false;       // Reset retry guard at turn boundary
+    reloadConfigFromDisk();
+    if (!state.activeGroup && config?.defaultGroup) {
+      state.activeGroup = config.defaultGroup;
+    }
     updateStatusBar(ctx);
+    // Freshen stored tokens FIRST so the rotated refresh token is in memory,
+    // then syncAuthToHa can match against it instead of creating a new backup.
+    await syncActiveCredentialFromAuth();                    // Freshen active credential tokens in ha.json
     const auth = await loadAuthJson();
     if (syncAuthToHa(auth, ctx)) await saveConfig(config!); // Pick up any new credentials from auth.json
-    await syncActiveCredentialFromAuth();                    // Freshen active credential tokens in ha.json
   });
 
   pi.on("turn_end", async (event, ctx) => {

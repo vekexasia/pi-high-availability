@@ -221,3 +221,22 @@ export function determineCredentialType(creds: Record<string, unknown>): string 
   if (creds.key) return "api_key";
   return undefined;
 }
+
+// ─── Config Reload Merge ─────────────────────────────────────────────────────
+
+/**
+ * Merge only the safe "config" fields from a freshly-parsed ha.json into the
+ * in-memory config. Credentials are intentionally NOT merged here — they are
+ * managed by syncAuthToHa via auth.json. Runtime state (activeCredential,
+ * exhausted) lives in the separate `state` object and is unaffected.
+ */
+export function mergeConfigFromDisk(current: HaConfig, fresh: HaConfig): HaConfig {
+  return {
+    ...current,
+    groups: fresh.groups ?? current.groups,
+    defaultGroup: fresh.defaultGroup ?? current.defaultGroup,
+    defaultCooldownMs: fresh.defaultCooldownMs ?? current.defaultCooldownMs,
+    errorHandling: fresh.errorHandling ?? current.errorHandling,
+    // credentials intentionally NOT merged — managed by syncAuthToHa via auth.json
+  };
+}

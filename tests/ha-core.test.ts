@@ -13,7 +13,9 @@ import {
   credentialFingerprint,
   determineNewCredentialName,
   determineCredentialType,
+  mergeConfigFromDisk,
   type ExhaustionEntry,
+  type HaConfig,
   type HaGroup,
 } from "../extensions/ha-core";
 
@@ -571,5 +573,107 @@ describe("determineCredentialType", () => {
 
   it("prefers oauth when both refresh and key present", () => {
     expect(determineCredentialType({ refresh: "token", key: "sk-123" })).toBe("oauth");
+  });
+});
+
+// ─── mergeConfigFromDisk ──────────────────────────────────────────────────────
+
+describe("mergeConfigFromDisk", () => {
+  const baseConfig: HaConfig = {
+    groups: {
+      primary: { name: "primary", entries: [{ id: "anthropic/claude-3" }] },
+    },
+    defaultGroup: "primary",
+    defaultCooldownMs: 3600000,
+    credentials: {
+      anthropic: { primary: { key: "sk-original" }, __meta: { defaultName: "primary" } },
+    },
+    errorHandling: {
+      capacityErrorAction: "next_provider",
+      quotaErrorAction: "next_key_then_provider",
+      retryTimeoutMs: 300000,
+      maxRetriesPerTurn: 3,
+    },
+  };
+
+  it("merges groups from fresh config", () => {
+    const fresh: HaConfig = {
+      groups: {
+        primary: { name: "primary", entries: [{ id: "anthropic/claude-3" }] },
+        fallback: { name: "fallback", entries: [{ id: "openai/gpt-4" }] },
+      },
+      defaultGroup: "primary",
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    expect(Object.keys(result.groups)).toContain("fallback");
+    expect(result.groups.fallback.entries[0].id).toBe("openai/gpt-4");
+  });
+
+  it("merges defaultGroup from fresh config", () => {
+    const fresh: HaConfig = {
+      groups: baseConfig.groups,
+      defaultGroup: "fallback",
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    expect(result.defaultGroup).toBe("fallback");
+  });
+
+  it("merges defaultCooldownMs from fresh config", () => {
+    const fresh: HaConfig = {
+      groups: baseConfig.groups,
+      defaultCooldownMs: 1800000,
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    expect(result.defaultCooldownMs).toBe(1800000);
+  });
+
+  it("merges errorHandling from fresh config", () => {
+    const fresh: HaConfig = {
+      groups: baseConfig.groups,
+      errorHandling: {
+        capacityErrorAction: "retry",
+        maxRetriesPerTurn: 5,
+      },
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    expect(result.errorHandling?.capacityErrorAction).toBe("retry");
+    expect(result.errorHandling?.maxRetriesPerTurn).toBe(5);
+  });
+
+  it("preserves credentials from current config (never overwritten)", () => {
+    const fresh: HaConfig = {
+      groups: baseConfig.groups,
+      credentials: {
+        anthropic: { primary: { key: "sk-from-disk" } },
+      },
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    // credentials must come from current, not fresh
+    expect((result.credentials?.anthropic as any)?.primary?.key).toBe("sk-original");
+  });
+
+  it("falls back to current values when fresh fields are undefined", () => {
+    const fresh: HaConfig = {
+      groups: { primary: { name: "primary", entries: [] } },
+      // defaultGroup, defaultCooldownMs, errorHandling all undefined
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    expect(result.defaultGroup).toBe("primary");
+    expect(result.defaultCooldownMs).toBe(3600000);
+    expect(result.errorHandling?.maxRetriesPerTurn).toBe(3);
+  });
+
+  it("handles fresh config with partial fields (groups + no errorHandling)", () => {
+    const fresh: HaConfig = {
+      groups: {
+        primary: { name: "primary", entries: [{ id: "openai/gpt-4" }] },
+      },
+      defaultGroup: "primary",
+    };
+    const result = mergeConfigFromDisk(baseConfig, fresh);
+    // groups updated
+    expect(result.groups.primary.entries[0].id).toBe("openai/gpt-4");
+    // errorHandling preserved from current
+    expect(result.errorHandling?.capacityErrorAction).toBe("next_provider");
   });
 });
