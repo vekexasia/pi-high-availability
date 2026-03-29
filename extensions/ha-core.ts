@@ -51,6 +51,7 @@ export function classifyError(errorMsg: string): "capacity" | "quota" | null {
   const isCapacity =
     lower.includes("no capacity") ||
     lower.includes("engine overloaded") ||
+    lower.includes("overloaded_error") ||
     /\b503\b/.test(errorMsg) ||
     lower.includes("service temporarily unavailable") ||
     /\b(server|service)\s+(is\s+)?overloaded\b/.test(lower);

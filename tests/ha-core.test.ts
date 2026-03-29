@@ -125,6 +125,35 @@ describe("classifyError", () => {
   it("does not match bare 'capacity' (e.g. 'capacity planning')", () => {
     expect(classifyError("capacity planning for Q3")).toBeNull();
   });
+
+  // Real-world provider error messages
+  it("Anthropic: rate_limit_error", () => {
+    expect(classifyError("rate_limit_error: Too many requests")).toBe("quota");
+  });
+
+  it("Anthropic: overloaded_error", () => {
+    expect(classifyError("overloaded_error: Overloaded")).toBe("capacity");
+  });
+
+  it("Gemini: RESOURCE_EXHAUSTED", () => {
+    expect(classifyError("RESOURCE_EXHAUSTED: Quota exceeded")).toBe("quota");
+  });
+
+  it("Gemini: quota_exceeded", () => {
+    expect(classifyError("quota exceeded for the day")).toBe("quota");
+  });
+
+  it("OpenAI: rate_limit_exceeded", () => {
+    expect(classifyError("Rate limit exceeded: You have exceeded your rate limit")).toBe("quota");
+  });
+
+  it("OpenAI: insufficient_quota", () => {
+    expect(classifyError("You exceeded your current quota, please check your plan and billing details")).toBe("quota");
+  });
+
+  it("Moonshot: exceeded_current_quota_error", () => {
+    expect(classifyError("exceeded_current_quota_error: Quota exhausted")).toBe("quota");
+  });
 });
 
 // ─── Exhaustion Key Generation ───────────────────────────────────────────────
