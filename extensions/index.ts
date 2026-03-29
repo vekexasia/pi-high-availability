@@ -300,6 +300,15 @@ export default function (pi: ExtensionAPI) {
         break; // Use the most recent entry only
       }
     }
+    // Sync the dedup cache so the first persistState() after restore
+    // doesn't append a duplicate when state hasn't actually changed.
+    lastPersistedJson = JSON.stringify({
+      activeGroup: state.activeGroup,
+      exhausted: Object.fromEntries(
+        [...state.exhausted.entries()].map(([k, v]) => [k, v])
+      ),
+      activeCredential: Object.fromEntries(state.activeCredential),
+    });
     // NOTE: pi's SessionManager is append-only — entries cannot be removed.
     // ha-state entries will accumulate across persists. We only restore from
     // the most recent entry (searched in reverse above), so stale entries are
