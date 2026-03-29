@@ -474,6 +474,38 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
+  // ─── /ha-group-delete <name> ───────────────────────────────────────────────
+  pi.registerCommand("ha-group-delete", {
+    description: "Delete a group: /ha-group-delete <name>",
+    handler: async (args, ctx) => {
+      const name = (args || "").trim();
+      if (!name) {
+        ctx.ui.notify("Usage: /ha-group-delete <name>", "warning");
+        return;
+      }
+      if (!config?.groups?.[name]) {
+        ctx.ui.notify(`[HA] Group '${name}' not found.`, "warning");
+        return;
+      }
+      if (state.activeGroup === name) {
+        ctx.ui.notify(
+          `[HA] Cannot delete the active group '${name}'. Switch to a different group first.`,
+          "error",
+        );
+        return;
+      }
+      if (!await ctx.ui.confirm("Delete group", `Delete group '${name}'? This cannot be undone.`)) return;
+
+      delete config.groups[name];
+      if (config.defaultGroup === name) {
+        config.defaultGroup = undefined;
+      }
+      await saveConfig(config);
+      persistState();
+      ctx.ui.notify(`[HA] Group '${name}' deleted.`, "info");
+    },
+  });
+
   // ─── /ha-activate <provider> <name> ────────────────────────────────────────
   pi.registerCommand("ha-activate", {
     description: "Activate a credential: /ha-activate <provider> <name>",
