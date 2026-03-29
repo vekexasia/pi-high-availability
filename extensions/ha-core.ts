@@ -27,7 +27,7 @@ export interface HaConfig {
   groups: Record<string, HaGroup>;
   defaultGroup?: string;
   defaultCooldownMs?: number;
-  credentials?: Record<string, Record<string, any>>;
+  credentials?: Record<string, ProviderCredentials>;
   errorHandling?: {
     capacityErrorAction?: ErrorAction;
     quotaErrorAction?: ErrorAction;
@@ -152,7 +152,7 @@ export function resolveGroupEntryModel(
 
 export function pickCredentialForProvider(
   providerId: string,
-  credentials: Record<string, Record<string, any>> | undefined,
+  credentials: Record<string, ProviderCredentials> | undefined,
   activeCredential: Map<string, string>,
   exhausted: Map<string, ExhaustionEntry>,
   now: number = Date.now(),
@@ -166,11 +166,11 @@ export function pickCredentialForProvider(
   const stored = credentials?.[providerId];
   if (!stored) return undefined;
 
-  const names = getCredentialNames(stored as ProviderCredentials);
+  const names = getCredentialNames(stored);
   if (names.length === 0) return undefined;
 
   const active = activeCredential.get(providerId);
-  const preferred = [active, getDefaultCredentialName(stored as ProviderCredentials), ...names].filter(
+  const preferred = [active, getDefaultCredentialName(stored), ...names].filter(
     (name, idx, arr): name is string => !!name && arr.indexOf(name) === idx,
   );
 
@@ -181,8 +181,8 @@ export function pickCredentialForProvider(
 
 // ─── Credential Matching (syncAuthToHa logic) ───────────────────────────────
 
-export function credentialFingerprint(cred: Record<string, any>): string {
-  const filtered: Record<string, any> = {};
+export function credentialFingerprint(cred: Record<string, unknown>): string {
+  const filtered: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(cred)) {
     if (k !== "type" && k !== "__meta") {
       filtered[k] = v;
@@ -192,8 +192,8 @@ export function credentialFingerprint(cred: Record<string, any>): string {
 }
 
 export function findMatchingCredentialName(
-  stored: Record<string, any>,
-  authCreds: Record<string, any>,
+  stored: ProviderCredentials,
+  authCreds: Record<string, unknown>,
 ): string | null {
   // Phase 1: match on stable identity fields only (access tokens change on OAuth refresh)
   for (const [name, existing] of Object.entries(stored)) {
@@ -216,7 +216,7 @@ export function determineNewCredentialName(existingNames: string[]): string {
   return existingNames.length === 0 ? "primary" : `backup-${existingNames.length}`;
 }
 
-export function determineCredentialType(creds: Record<string, any>): string | undefined {
+export function determineCredentialType(creds: Record<string, unknown>): string | undefined {
   if (creds.refresh) return "oauth";
   if (creds.key) return "api_key";
   return undefined;

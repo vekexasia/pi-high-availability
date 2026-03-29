@@ -1,3 +1,6 @@
+// TODO(#9): Consider defining a CredentialEntry interface with key/refresh/type
+// fields and using Record<string, CredentialEntry> instead of Record<string, any>
+// once all credential shapes are well-understood.
 export type ProviderCredentials = Record<string, any> & {
   __meta?: {
     defaultName?: string;

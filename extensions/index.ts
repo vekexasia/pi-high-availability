@@ -2,8 +2,14 @@
  * High Availability Provider Extension for Pi
  */
 
-import type { Model } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { Model, TextContent } from "@mariozechner/pi-ai";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ExtensionUIContext,
+  SessionMessageEntry,
+} from "@mariozechner/pi-coding-agent";
+import type { CustomEntry } from "@mariozechner/pi-coding-agent";
 import { chmodSync, readFileSync, writeFileSync } from "fs";
 import { chmod, readFile, writeFile } from "fs/promises";
 import { join } from "path";
@@ -16,6 +22,7 @@ import {
   isReservedCredentialName,
   normalizeCredentialProviders,
   setDefaultCredentialName,
+  type ProviderCredentials,
 } from "./credentialMeta";
 import {
   classifyError,
@@ -37,6 +44,16 @@ import {
   type HaGroupEntry,
 } from "./ha-core";
 
+/** Shape of ~/.pi/agent/auth.json — maps provider ID to credential data. */
+type AuthJson = Record<string, Record<string, unknown>>;
+
+/** Shape of the ha-state custom session entry data. */
+interface HaStateData {
+  activeGroup?: string;
+  exhausted?: Record<string, ExhaustionEntry>;
+  activeCredential?: Record<string, string>;
+}
+
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "ha.json");
 const AUTH_PATH = join(AGENT_DIR, "auth.json");
@@ -53,11 +70,11 @@ const state = {
   activeCredential: new Map<string, string>(),
   retryTimeoutId: null as NodeJS.Timeout | null,
   lastStatusModel: null as { provider: string; id: string } | null,
-  lastStatusUI: null as any,
+  lastStatusUI: null as ExtensionUIContext | null,
   retriesThisTurn: 0,
 };
 
-function updateStatusBar(ctx?: any) {
+function updateStatusBar(ctx?: ExtensionContext) {
   if (ctx?.ui) state.lastStatusUI = ctx.ui;
   if (ctx !== undefined) {
     state.lastStatusModel = ctx.model
@@ -77,23 +94,23 @@ function updateStatusBar(ctx?: any) {
 
 let config: HaConfig | null = null;
 
-async function loadAuthJson(): Promise<any> {
-  try { return JSON.parse(await readFile(AUTH_PATH, "utf-8")); }
+async function loadAuthJson(): Promise<AuthJson> {
+  try { return JSON.parse(await readFile(AUTH_PATH, "utf-8")) as AuthJson; }
   catch { return {}; }
 }
 
-async function saveAuthJson(auth: any): Promise<void> {
+async function saveAuthJson(auth: AuthJson): Promise<void> {
   await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf-8");
 }
 
 async function saveConfig(cfg: HaConfig): Promise<void> {
-  normalizeCredentialProviders(cfg.credentials as any);
+  normalizeCredentialProviders(cfg.credentials);
   config = cfg;
   await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
   await chmod(CONFIG_PATH, 0o600);
 }
 
-function syncAuthToHa(auth: any, ctx?: any): boolean {
+function syncAuthToHa(auth: AuthJson, ctx?: ExtensionContext): boolean {
   if (!config) return false;
   if (!config.credentials) config.credentials = {};
   let changed = false;
@@ -101,20 +118,20 @@ function syncAuthToHa(auth: any, ctx?: any): boolean {
   for (const [providerId, creds] of Object.entries(auth)) {
     if (!config.credentials[providerId]) config.credentials[providerId] = {};
     const stored = config.credentials[providerId];
-    ensureCredentialMeta(stored as any);
+    ensureCredentialMeta(stored);
 
-    const foundName = findMatchingCredentialName(stored, creds as any);
+    const foundName = findMatchingCredentialName(stored, creds);
 
     if (!foundName) {
-      const existingNames = getCredentialNames(stored as any);
+      const existingNames = getCredentialNames(stored);
       const name = determineNewCredentialName(existingNames);
       const newCred = structuredClone(creds);
-      const credType = determineCredentialType(creds as any);
+      const credType = determineCredentialType(creds);
       if (credType) newCred.type = credType;
 
       stored[name] = newCred;
       if (existingNames.length === 0) {
-        setDefaultCredentialName(stored as any, name);
+        setDefaultCredentialName(stored, name);
       }
       changed = true;
 
@@ -130,7 +147,7 @@ function syncAuthToHa(auth: any, ctx?: any): boolean {
       }
       state.activeCredential.set(providerId, name);
     } else {
-      ensureCredentialMeta(stored as any);
+      ensureCredentialMeta(stored);
       state.activeCredential.set(providerId, foundName);
     }
   }
@@ -169,7 +186,7 @@ async function syncActiveCredentialFromAuth(): Promise<boolean> {
   return changed;
 }
 
-async function switchCred(providerId: string, name: string, ctx?: any): Promise<boolean> {
+async function switchCred(providerId: string, name: string, ctx?: ExtensionContext): Promise<boolean> {
   const stored = config?.credentials?.[providerId];
   if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
   const auth = await loadAuthJson();
@@ -194,22 +211,22 @@ async function switchCred(providerId: string, name: string, ctx?: any): Promise<
   return true;
 }
 
-function updateActiveCredentialsFromAuth(auth: any) {
+function updateActiveCredentialsFromAuth(auth: AuthJson) {
   if (!config?.credentials) return;
 
   for (const [providerId, currentAuth] of Object.entries(auth)) {
     const stored = config.credentials[providerId];
     if (!stored) continue;
-    ensureCredentialMeta(stored as any);
+    ensureCredentialMeta(stored);
 
     for (const [name, cred] of Object.entries(stored)) {
       if (!isCredentialEntryKey(name)) continue;
 
-      if ((currentAuth as any).key && (currentAuth as any).key === (cred as any).key) {
+      if (currentAuth.key && currentAuth.key === cred.key) {
         state.activeCredential.set(providerId, name);
         break;
       }
-      if ((currentAuth as any).refresh && (currentAuth as any).refresh === (cred as any).refresh) {
+      if (currentAuth.refresh && currentAuth.refresh === cred.refresh) {
         state.activeCredential.set(providerId, name);
         break;
       }
@@ -240,25 +257,26 @@ export default function (pi: ExtensionAPI) {
   try {
     config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
     try { chmodSync(CONFIG_PATH, 0o600); } catch {} // Tighten permissions on every startup
-    normalizeCredentialProviders(config?.credentials as any);
+    normalizeCredentialProviders(config?.credentials);
     if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
 
     // Inline sync read of auth.json (loadAuthJson is now async, can't use it here)
-    let startupAuth: any = {};
-    try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")); } catch {}
+    let startupAuth: AuthJson = {};
+    try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as AuthJson; } catch {}
 
     // syncAuthToHa now accepts auth param and returns changed boolean
     if (syncAuthToHa(startupAuth)) {
-      normalizeCredentialProviders(config!.credentials as any);
+      normalizeCredentialProviders(config!.credentials);
       writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
       chmodSync(CONFIG_PATH, 0o600);
     }
 
     // updateActiveCredentialsFromAuth now accepts auth param
     updateActiveCredentialsFromAuth(startupAuth);
-  } catch (e: any) {
-    if (e.code !== "ENOENT") {
-      console.error(`[HA] Failed to load ha.json: ${e.message}`);
+  } catch (e: unknown) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code !== "ENOENT") {
+      console.error(`[HA] Failed to load ha.json: ${err.message}`);
     }
   }
 
@@ -281,9 +299,9 @@ export default function (pi: ExtensionAPI) {
     // Restore persisted HA state from the most recent ha-state entry.
     const entries = ctx.sessionManager.getEntries();
     for (let i = entries.length - 1; i >= 0; i--) {
-      const entry = entries[i] as any;
+      const entry = entries[i];
       if (entry.type === "custom" && entry.customType === "ha-state" && entry.data) {
-        const data = entry.data;
+        const data = (entry as CustomEntry<HaStateData>).data as HaStateData;
         if (data.activeGroup) state.activeGroup = data.activeGroup;
         if (data.exhausted) {
           state.exhausted.clear();
@@ -364,10 +382,10 @@ export default function (pi: ExtensionAPI) {
       if (config.credentials && Object.keys(config.credentials).length > 0) {
         lines.push("\nCredentials:");
         for (const [provider, creds] of Object.entries(config.credentials)) {
-          const names = getCredentialNames(creds as any);
+          const names = getCredentialNames(creds);
           const active =
             state.activeCredential.get(provider) ||
-            getDefaultCredentialName(creds as any) ||
+            getDefaultCredentialName(creds) ||
             "none";
           lines.push(`  ${provider}: ${names.join(", ")} (active: ${active})`);
           for (const name of names) {
@@ -414,23 +432,23 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      if (getCredentialNames(stored as any).includes(newName)) {
+      if (getCredentialNames(stored).includes(newName)) {
         ctx.ui.notify(`[HA] Name '${newName}' already exists for ${provider}.`, "warning");
         return;
       }
 
       // Rebuild object preserving insertion order
-      const newCreds: Record<string, any> = {};
+      const newCreds: ProviderCredentials = {};
       for (const [k, v] of Object.entries(stored)) {
         newCreds[k === oldName ? newName : k] = v;
       }
       config.credentials[provider] = newCreds;
 
       // Update default name if the renamed one was default
-      if (getDefaultCredentialName(stored as any) === oldName) {
-        setDefaultCredentialName(newCreds as any, newName);
+      if (getDefaultCredentialName(stored) === oldName) {
+        setDefaultCredentialName(newCreds, newName);
       } else {
-        ensureCredentialMeta(newCreds as any);
+        ensureCredentialMeta(newCreds);
       }
 
       // Update active tracking
@@ -574,7 +592,7 @@ export default function (pi: ExtensionAPI) {
 
       // /ha-clear <provider> — clear all credentials for a provider
       if (parts.length === 1) {
-        const names = getCredentialNames(config.credentials[provider] as any);
+        const names = getCredentialNames(config.credentials[provider]);
         if (!await ctx.ui.confirm("Clear provider credentials", `Delete all ${names.length} credential(s) for ${provider}?`)) return;
         delete config.credentials[provider];
         state.activeCredential.delete(provider);
@@ -608,13 +626,13 @@ export default function (pi: ExtensionAPI) {
 
       if (!await ctx.ui.confirm("Clear credential", `Delete credential '${name}' for ${provider}?`)) return;
 
-      const wasDefault = getDefaultCredentialName(stored as any) === name;
+      const wasDefault = getDefaultCredentialName(stored) === name;
       delete stored[name];
       state.exhausted.delete(getCredentialExhaustionKey(provider, name));
 
       // Update active credential if we just deleted the active one
       if (state.activeCredential.get(provider) === name) {
-        const remaining = getCredentialNames(stored as any);
+        const remaining = getCredentialNames(stored);
         if (remaining.length > 0) {
           state.activeCredential.set(provider, remaining[0]);
         } else {
@@ -624,13 +642,13 @@ export default function (pi: ExtensionAPI) {
 
       // Update default if needed
       if (wasDefault) {
-        setDefaultCredentialName(stored as any);
+        setDefaultCredentialName(stored);
       } else {
-        ensureCredentialMeta(stored as any);
+        ensureCredentialMeta(stored);
       }
 
       // Clean up empty provider
-      if (getCredentialNames(stored as any).length === 0) {
+      if (getCredentialNames(stored).length === 0) {
         delete config.credentials[provider];
       }
 
@@ -725,9 +743,9 @@ export default function (pi: ExtensionAPI) {
     // Mark current credential exhausted regardless of action
     const stored = config.credentials?.[providerId];
     if (stored) {
-      const names = getCredentialNames(stored as any);
+      const names = getCredentialNames(stored);
       const currentCred =
-        state.activeCredential.get(providerId) || getDefaultCredentialName(stored as any) || names[0];
+        state.activeCredential.get(providerId) || getDefaultCredentialName(stored) || names[0];
       if (currentCred) {
         markExhausted(getCredentialExhaustionKey(providerId, currentCred), providerCooldown);
       }
@@ -835,19 +853,21 @@ export default function (pi: ExtensionAPI) {
     updateStatusBar(ctx);
   });
 
-  function retryTurn(ctx: any) {
+  function retryTurn(ctx: ExtensionContext) {
     state.isRetrying = true;
     try {
       const branch = ctx.sessionManager.getBranch();
       const lastUser = branch
         .slice()
         .reverse()
-        .find((e: any) => e.type === "message" && e.message.role === "user") as any;
-      if (lastUser) {
+        .find((e): e is SessionMessageEntry =>
+          e.type === "message" && (e as SessionMessageEntry).message.role === "user"
+        );
+      if (lastUser && lastUser.message.role === "user") {
         let content = lastUser.message.content;
         // Strip image blocks to avoid doubling token costs on retry
         if (Array.isArray(content)) {
-          const textOnly = content.filter((b: any) => b.type === "text");
+          const textOnly = content.filter((b): b is TextContent => b.type === "text");
           if (textOnly.length < content.length) {
             if (textOnly.length > 0) {
               content = textOnly;
@@ -862,8 +882,9 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify("[HA] No user message found to retry.", "warning");
         state.isRetrying = false;
       }
-    } catch (err: any) {
-      ctx.ui.notify(`[HA] Retry failed: ${err?.message || err}`, "error");
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`[HA] Retry failed: ${message}`, "error");
       state.isRetrying = false;
     }
   }
