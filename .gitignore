@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# ha.json stores plaintext OAuth tokens and API keys — never commit it
+ha.json

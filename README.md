@@ -1,5 +1,7 @@
 # pi-high-availability 🔄
 
+> ⚠️ **Security notice:** `~/.pi/agent/ha.json` stores OAuth refresh tokens and API keys in plaintext. Treat it like a password file — keep it out of version control (add to `.gitignore`), backups, and dotfile repos. The extension sets `chmod 600` automatically, but you are responsible for not exposing the file externally.
+
 **pi-high-availability** automatically switches to fallback LLM providers when your primary provider hits quota limits or capacity constraints. Never get stuck waiting for quota resets again.
 
 ## ✨ Features
@@ -101,7 +103,14 @@ The extension detects:
 
 ## ⚙️ Configuration Guide (`ha.json`)
 
-While you can use slash commands for most tasks, you can also manually edit `~/.pi/agent/ha.json`:
+While you can use slash commands for most tasks, you can also manually edit `~/.pi/agent/ha.json`.
+
+> ⚠️ **`ha.json` contains plaintext credentials.** Add it to your `.gitignore` and never commit or share it:
+> ```
+> echo 'ha.json' >> ~/.gitignore_global
+> ```
+
+
 
 ```json
 {
