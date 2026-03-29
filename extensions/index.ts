@@ -446,8 +446,14 @@ export default function (pi: ExtensionAPI) {
       const entries: HaGroupEntry[] = modelIds.map((id) => ({ id }));
       config.groups[name] = { name, entries };
 
-      // Validate model IDs and warn about unresolvable entries
+      // Validate model IDs and warn about unresolvable or ambiguous entries
       for (const id of modelIds) {
+        if (!id.includes("/")) {
+          ctx.ui.notify(
+            `[HA] Warning: '${id}' is a bare provider name — use 'provider/model-id' format for deterministic failover`,
+            "warning",
+          );
+        }
         const model = resolveGroupEntryModel(id, ctx.modelRegistry);
         if (!model) {
           ctx.ui.notify(`[HA] Warning: model '${id}' not found in registry`, "warning");
