@@ -44,6 +44,7 @@ const AUTH_PATH = join(AGENT_DIR, "auth.json");
 // Module-level hook — assigned inside export default once `pi` is available,
 // so switchCred() can call it without needing `pi` in its own scope.
 let persistState: () => void = () => {};
+let lastPersistedJson = "";
 
 const state = {
   activeGroup: null as string | null,
@@ -270,6 +271,9 @@ export default function (pi: ExtensionAPI) {
       ),
       activeCredential: Object.fromEntries(state.activeCredential),
     };
+    const json = JSON.stringify(serialized);
+    if (json === lastPersistedJson) return; // state unchanged — skip append
+    lastPersistedJson = json;
     pi.appendEntry("ha-state", serialized);
   };
 
