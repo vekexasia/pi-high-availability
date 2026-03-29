@@ -644,11 +644,13 @@ export default function (pi: ExtensionAPI) {
 
     if (action === "retry") {
       if (state.retryTimeoutId) clearTimeout(state.retryTimeoutId);
+      const jitter = Math.floor(retryTimeoutMs * 0.1 * (Math.random() * 2 - 1)); // ±10%
+      const actualDelay = retryTimeoutMs + jitter;
       ctx.ui.notify(
-        `⏱️ ${isCapacityError ? "Capacity" : "Quota"} error. Retrying in ${retryTimeoutMs}ms...`,
+        `⏱️ ${isCapacityError ? "Capacity" : "Quota"} error. Retrying in ${Math.round(actualDelay / 1000)}s...`,
         "warning",
       );
-      state.retryTimeoutId = setTimeout(() => { retryTurn(ctx); }, retryTimeoutMs);
+      state.retryTimeoutId = setTimeout(() => { retryTurn(ctx); }, actualDelay);
       return;
     }
 
