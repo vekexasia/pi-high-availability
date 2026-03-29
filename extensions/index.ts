@@ -334,7 +334,15 @@ export default function (pi: ExtensionAPI) {
           );
           for (const entry of group.entries) {
             const exhausted = isExhausted(getEntryExhaustionKey(entry.id));
-            lines.push(`    - ${entry.id}${exhausted ? " ⛔ exhausted" : ""}`);
+            if (exhausted) {
+              const entryKey = getEntryExhaustionKey(entry.id);
+              const entryData = state.exhausted.get(entryKey);
+              const remainMs = entryData ? Math.max(0, entryData.cooldownMs - (Date.now() - entryData.exhaustedAt)) : 0;
+              const remainMin = Math.ceil(remainMs / 60000);
+              lines.push(`    - ${entry.id} ⛔ exhausted (recovers in ~${remainMin}m)`);
+            } else {
+              lines.push(`    - ${entry.id}`);
+            }
           }
         }
       }
@@ -351,7 +359,13 @@ export default function (pi: ExtensionAPI) {
           lines.push(`  ${provider}: ${names.join(", ")} (active: ${active})`);
           for (const name of names) {
             const exhausted = isExhausted(getCredentialExhaustionKey(provider, name));
-            if (exhausted) lines.push(`    ⛔ ${name} exhausted`);
+            if (exhausted) {
+              const credKey = getCredentialExhaustionKey(provider, name);
+              const credEntry = state.exhausted.get(credKey);
+              const remainMs = credEntry ? Math.max(0, credEntry.cooldownMs - (Date.now() - credEntry.exhaustedAt)) : 0;
+              const remainMin = Math.ceil(remainMs / 60000);
+              lines.push(`    ⛔ ${name} exhausted (recovers in ~${remainMin}m)`);
+            }
           }
         }
       }
