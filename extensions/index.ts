@@ -30,7 +30,6 @@ import {
   countActiveExhausted,
   determineCredentialType,
   determineNewCredentialName,
-  findDeadCredentials,
   findMatchingCredentialName,
   getCredentialExhaustionKey,
   getEntryExhaustionKey,
@@ -67,8 +66,6 @@ const LOCK_OPTS = {
   stale: 30000,
 };
 
-/** Max age for proactive credential pruning (7 days). */
-const MAX_EXPIRED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Atomic read-modify-write with file locking.
@@ -746,31 +743,6 @@ export default function (pi: ExtensionAPI) {
     await syncActiveCredentialFromAuth();                    // Freshen active credential tokens in ha.json
     const auth = await loadAuthJson();
     if (syncAuthToHa(auth, ctx)) await saveConfig(config!); // Pick up any new credentials from auth.json
-
-    // Proactive cleanup: remove credentials expired for longer than MAX_EXPIRED_AGE_MS
-    if (config?.credentials) {
-      const dead = findDeadCredentials(config.credentials, MAX_EXPIRED_AGE_MS);
-      if (dead.length > 0) {
-        for (const { provider, name } of dead) {
-          delete config.credentials[provider][name];
-          state.exhausted.delete(getCredentialExhaustionKey(provider, name));
-          if (state.activeCredential.get(provider) === name) {
-            const remaining = getCredentialNames(config.credentials[provider]);
-            if (remaining.length > 0) {
-              state.activeCredential.set(provider, remaining[0]);
-            } else {
-              state.activeCredential.delete(provider);
-            }
-          }
-          if (getCredentialNames(config.credentials[provider]).length === 0) {
-            delete config.credentials[provider];
-          }
-          ctx.ui.notify(`[HA] Removed stale credential '${name}' for ${provider} (expired >7d ago)`, "info");
-        }
-        await saveConfig(config);
-        persistState();
-      }
-    }
   });
 
   pi.on("turn_end", async (event, ctx) => {
