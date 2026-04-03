@@ -206,7 +206,8 @@ async function switchCred(providerId: string, name: string, ctx?: ExtensionConte
   const auth = await loadAuthJson();
 
   // Strip HA-internal metadata before writing to auth.json
-  const { type: _type, __meta: _meta, ...credToSave } = structuredClone(stored[name]);
+  // Keep `type` — authStorage.getApiKey() needs it to identify oauth vs api_key credentials
+  const { __meta: _meta, ...credToSave } = structuredClone(stored[name]);
   auth[providerId] = credToSave;
   await saveAuthJson(auth);
   state.activeCredential.set(providerId, name);
