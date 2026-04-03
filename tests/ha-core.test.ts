@@ -28,8 +28,24 @@ describe("classifyError", () => {
 
   it("returns null for unrelated errors", () => {
     expect(classifyError("Connection refused")).toBeNull();
-    expect(classifyError("Invalid API key")).toBeNull();
     expect(classifyError("Timeout after 30s")).toBeNull();
+  });
+
+  // Auth errors
+  it("detects 'Invalid API key' as auth", () => {
+    expect(classifyError("Invalid API key")).toBe("auth");
+  });
+
+  it("detects 'No API key for provider' as auth", () => {
+    expect(classifyError("No API key for provider: openai-codex")).toBe("auth");
+  });
+
+  it("detects 401 as auth", () => {
+    expect(classifyError("Error: 401 Unauthorized")).toBe("auth");
+  });
+
+  it("detects 'authentication_error' as auth", () => {
+    expect(classifyError('{"type":"authentication_error"}')).toBe("auth");
   });
 
   // Capacity errors

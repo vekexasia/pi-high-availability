@@ -11,9 +11,10 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { CustomEntry } from "@mariozechner/pi-coding-agent";
 import { chmodSync, readFileSync, writeFileSync } from "fs";
-import { chmod, readFile, writeFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import { homedir } from "os";
+import lockfile from "proper-lockfile";
 import {
   ensureCredentialMeta,
   getCredentialNames,
@@ -29,6 +30,7 @@ import {
   countActiveExhausted,
   determineCredentialType,
   determineNewCredentialName,
+  findDeadCredentials,
   findMatchingCredentialName,
   getCredentialExhaustionKey,
   getEntryExhaustionKey,
@@ -58,6 +60,36 @@ interface HaStateData {
 const AGENT_DIR = join(homedir(), ".pi", "agent");
 const CONFIG_PATH = join(AGENT_DIR, "ha.json");
 const AUTH_PATH = join(AGENT_DIR, "auth.json");
+
+/** Lock options compatible with pi-agent-core's auth-storage locking. */
+const LOCK_OPTS = {
+  retries: { retries: 10, factor: 2, minTimeout: 100, maxTimeout: 10000, randomize: true },
+  stale: 30000,
+};
+
+/** Max age for proactive credential pruning (7 days). */
+const MAX_EXPIRED_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Atomic read-modify-write with file locking.
+ * `fn` receives the current file content and returns an optional new content to write.
+ */
+async function withFileLock<T>(
+  filePath: string,
+  fn: (raw: string) => Promise<{ raw?: string; result: T }>,
+): Promise<T> {
+  const release = await lockfile.lock(filePath, LOCK_OPTS);
+  try {
+    const current = await readFile(filePath, "utf-8").catch(() => "{}");
+    const { raw, result } = await fn(current);
+    if (raw !== undefined) {
+      await writeFile(filePath, raw, { encoding: "utf-8", mode: 0o600 });
+    }
+    return result;
+  } finally {
+    await release();
+  }
+}
 
 // Module-level hook — assigned inside export default once `pi` is available,
 // so switchCred() can call it without needing `pi` in its own scope.
@@ -100,10 +132,6 @@ async function loadAuthJson(): Promise<AuthJson> {
   catch { return {}; }
 }
 
-async function saveAuthJson(auth: AuthJson): Promise<void> {
-  await writeFile(AUTH_PATH, JSON.stringify(auth, null, 2), "utf-8");
-}
-
 function reloadConfigFromDisk(): void {
   try {
     const fresh = JSON.parse(readFileSync(CONFIG_PATH, "utf-8")) as HaConfig;
@@ -120,8 +148,30 @@ function reloadConfigFromDisk(): void {
 async function saveConfig(cfg: HaConfig): Promise<void> {
   normalizeCredentialProviders(cfg.credentials);
   config = cfg;
-  await writeFile(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
-  await chmod(CONFIG_PATH, 0o600);
+  await withFileLock(CONFIG_PATH, async (raw) => {
+    // Merge credentials from disk so we don't clobber another instance's additions
+    try {
+      const disk = JSON.parse(raw) as HaConfig;
+      if (disk.credentials && config!.credentials) {
+        for (const [provider, diskCreds] of Object.entries(disk.credentials)) {
+          if (!config!.credentials[provider]) {
+            config!.credentials[provider] = structuredClone(diskCreds);
+            continue;
+          }
+          const target = config!.credentials[provider];
+          for (const [name, value] of Object.entries(diskCreds)) {
+            if (name === "__meta") continue;
+            if (!Object.prototype.hasOwnProperty.call(target, name)) {
+              target[name] = structuredClone(value);
+            }
+          }
+        }
+      }
+    } catch {
+      // Disk parse failed — write our config as-is
+    }
+    return { raw: JSON.stringify(config, null, 2), result: undefined };
+  });
 }
 
 function syncAuthToHa(auth: AuthJson, ctx?: ExtensionContext): boolean {
@@ -203,13 +253,16 @@ async function syncActiveCredentialFromAuth(): Promise<boolean> {
 async function switchCred(providerId: string, name: string, ctx?: ExtensionContext): Promise<boolean> {
   const stored = config?.credentials?.[providerId];
   if (!stored || !Object.prototype.hasOwnProperty.call(stored, name) || !isCredentialEntryKey(name)) return false;
-  const auth = await loadAuthJson();
 
   // Strip HA-internal metadata before writing to auth.json
   // Keep `type` — authStorage.getApiKey() needs it to identify oauth vs api_key credentials
   const { __meta: _meta, ...credToSave } = structuredClone(stored[name]);
-  auth[providerId] = credToSave;
-  await saveAuthJson(auth);
+
+  await withFileLock(AUTH_PATH, async (raw) => {
+    const auth = JSON.parse(raw) as AuthJson;
+    auth[providerId] = credToSave;
+    return { raw: JSON.stringify(auth, null, 2), result: undefined };
+  });
   state.activeCredential.set(providerId, name);
 
   // Force pi to re-read auth.json into memory.
@@ -270,24 +323,26 @@ function pickCredentialForProvider(providerId: string, entryId?: string) {
 
 export default function (pi: ExtensionAPI) {
   try {
-    config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
-    try { chmodSync(CONFIG_PATH, 0o600); } catch {} // Tighten permissions on every startup
-    normalizeCredentialProviders(config?.credentials);
-    if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
+    // Lock ha.json for the startup read-modify-write cycle
+    const releaseConfig = lockfile.lockSync(CONFIG_PATH, { realpath: false, stale: 30000 });
+    try {
+      config = JSON.parse(readFileSync(CONFIG_PATH, "utf-8"));
+      try { chmodSync(CONFIG_PATH, 0o600); } catch {}
+      normalizeCredentialProviders(config?.credentials);
+      if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
 
-    // Inline sync read of auth.json (loadAuthJson is now async, can't use it here)
-    let startupAuth: AuthJson = {};
-    try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as AuthJson; } catch {}
+      let startupAuth: AuthJson = {};
+      try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as AuthJson; } catch {}
 
-    // syncAuthToHa now accepts auth param and returns changed boolean
-    if (syncAuthToHa(startupAuth)) {
-      normalizeCredentialProviders(config!.credentials);
-      writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
-      chmodSync(CONFIG_PATH, 0o600);
+      if (syncAuthToHa(startupAuth)) {
+        normalizeCredentialProviders(config!.credentials);
+        writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+      }
+
+      updateActiveCredentialsFromAuth(startupAuth);
+    } finally {
+      releaseConfig();
     }
-
-    // updateActiveCredentialsFromAuth now accepts auth param
-    updateActiveCredentialsFromAuth(startupAuth);
   } catch (e: unknown) {
     const err = e as NodeJS.ErrnoException;
     if (err.code !== "ENOENT") {
@@ -691,6 +746,31 @@ export default function (pi: ExtensionAPI) {
     await syncActiveCredentialFromAuth();                    // Freshen active credential tokens in ha.json
     const auth = await loadAuthJson();
     if (syncAuthToHa(auth, ctx)) await saveConfig(config!); // Pick up any new credentials from auth.json
+
+    // Proactive cleanup: remove credentials expired for longer than MAX_EXPIRED_AGE_MS
+    if (config?.credentials) {
+      const dead = findDeadCredentials(config.credentials, MAX_EXPIRED_AGE_MS);
+      if (dead.length > 0) {
+        for (const { provider, name } of dead) {
+          delete config.credentials[provider][name];
+          state.exhausted.delete(getCredentialExhaustionKey(provider, name));
+          if (state.activeCredential.get(provider) === name) {
+            const remaining = getCredentialNames(config.credentials[provider]);
+            if (remaining.length > 0) {
+              state.activeCredential.set(provider, remaining[0]);
+            } else {
+              state.activeCredential.delete(provider);
+            }
+          }
+          if (getCredentialNames(config.credentials[provider]).length === 0) {
+            delete config.credentials[provider];
+          }
+          ctx.ui.notify(`[HA] Removed stale credential '${name}' for ${provider} (expired >7d ago)`, "info");
+        }
+        await saveConfig(config);
+        persistState();
+      }
+    }
   });
 
   pi.on("turn_end", async (event, ctx) => {
@@ -711,19 +791,48 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    const providerId = ctx.model?.provider;
+    if (!providerId) return;
+
+    const isAuthError = errorType === "auth";
     const isCapacityError = errorType === "capacity";
-    const errorLabel = isCapacityError ? "CAPACITY" : "QUOTA";
+    const errorLabel = isAuthError ? "AUTH" : isCapacityError ? "CAPACITY" : "QUOTA";
     ctx.ui.notify(
-      `[HA] turn_end: ${errorLabel} error from ${ctx.model?.provider}/${ctx.model?.id}: ${errorMsg.slice(0, 100)}`,
+      `[HA] turn_end: ${errorLabel} error from ${providerId}/${ctx.model?.id}: ${errorMsg.slice(0, 100)}`,
       "warning",
     );
 
-    const providerId = ctx.model?.provider;
-    if (!providerId) return;
+    // For auth errors: if the current credential is expired OAuth, the refresh token is dead — remove it
+    if (isAuthError && config.credentials?.[providerId]) {
+      const currentCred = state.activeCredential.get(providerId)
+        || getDefaultCredentialName(config.credentials[providerId]);
+      if (currentCred && config.credentials[providerId][currentCred]) {
+        const entry = config.credentials[providerId][currentCred];
+        if (entry.type === "oauth" && typeof entry.expires === "number" && entry.expires < Date.now()) {
+          ctx.ui.notify(`[HA] Removing dead credential '${currentCred}' for ${providerId} (expired + auth failed)`, "warning");
+          delete config.credentials[providerId][currentCred];
+          state.exhausted.delete(getCredentialExhaustionKey(providerId, currentCred));
+          if (state.activeCredential.get(providerId) === currentCred) {
+            const remaining = getCredentialNames(config.credentials[providerId]);
+            if (remaining.length > 0) {
+              state.activeCredential.set(providerId, remaining[0]);
+            } else {
+              state.activeCredential.delete(providerId);
+            }
+          }
+          if (getCredentialNames(config.credentials[providerId]).length === 0) {
+            delete config.credentials[providerId];
+          }
+          ensureCredentialMeta(config.credentials[providerId]);
+          await saveConfig(config);
+        }
+      }
+    }
 
     const group = config.groups[state.activeGroup];
     if (!group) return;
 
+    // Auth errors use the same failover strategy as quota errors
     const errorHandling = config.errorHandling || {};
     const action: ErrorAction = isCapacityError
       ? errorHandling.capacityErrorAction || "next_key_then_provider"

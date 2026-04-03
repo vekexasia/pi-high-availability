@@ -43,7 +43,7 @@ export interface ExhaustionEntry {
 
 // ─── Error Classification ────────────────────────────────────────────────────
 
-export function classifyError(errorMsg: string): "capacity" | "quota" | null {
+export function classifyError(errorMsg: string): "capacity" | "quota" | "auth" | null {
   if (!errorMsg) return null;
   const lower = errorMsg.toLowerCase();
 
@@ -70,6 +70,17 @@ export function classifyError(errorMsg: string): "capacity" | "quota" | null {
     lower.includes("too many requests");
 
   if (isQuota) return "quota";
+
+  // Auth patterns — credential is missing or permanently invalid
+  const isAuth =
+    lower.includes("no api key") ||
+    lower.includes("invalid api key") ||
+    lower.includes("invalid_api_key") ||
+    lower.includes("authentication_error") ||
+    lower.includes("unauthorized") ||
+    /\b401\b/.test(errorMsg);
+
+  if (isAuth) return "auth";
   return null;
 }
 
@@ -225,10 +236,9 @@ export function determineCredentialType(creds: Record<string, unknown>): string 
 // ─── Config Reload Merge ─────────────────────────────────────────────────────
 
 /**
- * Merge only the safe "config" fields from a freshly-parsed ha.json into the
- * in-memory config. Credentials are intentionally NOT merged here — they are
- * managed by syncAuthToHa via auth.json. Runtime state (activeCredential,
- * exhausted) lives in the separate `state` object and is unaffected.
+ * Merge a freshly-parsed ha.json into the in-memory config.
+ * Credentials are merged additively: entries from disk that don't exist in
+ * memory are added; entries in both keep the in-memory version (fresher tokens).
  */
 export function mergeConfigFromDisk(current: HaConfig, fresh: HaConfig): HaConfig {
   return {
@@ -237,6 +247,67 @@ export function mergeConfigFromDisk(current: HaConfig, fresh: HaConfig): HaConfi
     defaultGroup: fresh.defaultGroup ?? current.defaultGroup,
     defaultCooldownMs: fresh.defaultCooldownMs ?? current.defaultCooldownMs,
     errorHandling: fresh.errorHandling ?? current.errorHandling,
-    // credentials intentionally NOT merged — managed by syncAuthToHa via auth.json
+    credentials: mergeCredentials(current.credentials, fresh.credentials),
   };
+}
+
+/**
+ * Merge credentials from disk into in-memory credentials.
+ * - New providers/entries from disk are added.
+ * - Existing in-memory entries are kept (they have fresher tokens).
+ * - __meta is merged (disk fills in gaps).
+ */
+export function mergeCredentials(
+  current: Record<string, ProviderCredentials> | undefined,
+  fresh: Record<string, ProviderCredentials> | undefined,
+): Record<string, ProviderCredentials> | undefined {
+  if (!fresh && !current) return undefined;
+  if (!fresh) return current;
+  if (!current) return fresh;
+
+  const merged = structuredClone(current);
+  for (const [provider, freshCreds] of Object.entries(fresh)) {
+    if (!merged[provider]) {
+      merged[provider] = structuredClone(freshCreds);
+      continue;
+    }
+    const target = merged[provider];
+    for (const [name, value] of Object.entries(freshCreds)) {
+      if (name === "__meta") {
+        // Merge __meta: keep current values, fill gaps from disk
+        target.__meta = { ...value, ...target.__meta };
+        continue;
+      }
+      // Add entries from disk that don't exist in memory
+      if (!Object.prototype.hasOwnProperty.call(target, name)) {
+        target[name] = structuredClone(value);
+      }
+    }
+  }
+  return merged;
+}
+
+// ─── Dead Credential Detection ──────────────────────────────────────────────
+
+/**
+ * Find OAuth credentials whose access token expired more than `maxExpiredAgeMs` ago.
+ * These are almost certainly unrenewable (refresh token is also dead).
+ */
+export function findDeadCredentials(
+  credentials: Record<string, ProviderCredentials> | undefined,
+  maxExpiredAgeMs: number,
+  now: number = Date.now(),
+): Array<{ provider: string; name: string }> {
+  if (!credentials) return [];
+  const dead: Array<{ provider: string; name: string }> = [];
+  for (const [provider, creds] of Object.entries(credentials)) {
+    for (const name of getCredentialNames(creds)) {
+      const entry = creds[name];
+      if (entry?.type !== "oauth" || typeof entry.expires !== "number") continue;
+      if (entry.expires < now - maxExpiredAgeMs) {
+        dead.push({ provider, name });
+      }
+    }
+  }
+  return dead;
 }
