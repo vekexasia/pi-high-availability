@@ -774,32 +774,8 @@ export default function (pi: ExtensionAPI) {
       "warning",
     );
 
-    // For auth errors: if the current credential is expired OAuth, the refresh token is dead — remove it
-    if (isAuthError && config.credentials?.[providerId]) {
-      const currentCred = state.activeCredential.get(providerId)
-        || getDefaultCredentialName(config.credentials[providerId]);
-      if (currentCred && config.credentials[providerId][currentCred]) {
-        const entry = config.credentials[providerId][currentCred];
-        if (entry.type === "oauth" && typeof entry.expires === "number" && entry.expires < Date.now()) {
-          ctx.ui.notify(`[HA] Removing dead credential '${currentCred}' for ${providerId} (expired + auth failed)`, "warning");
-          delete config.credentials[providerId][currentCred];
-          state.exhausted.delete(getCredentialExhaustionKey(providerId, currentCred));
-          if (state.activeCredential.get(providerId) === currentCred) {
-            const remaining = getCredentialNames(config.credentials[providerId]);
-            if (remaining.length > 0) {
-              state.activeCredential.set(providerId, remaining[0]);
-            } else {
-              state.activeCredential.delete(providerId);
-            }
-          }
-          if (getCredentialNames(config.credentials[providerId]).length === 0) {
-            delete config.credentials[providerId];
-          }
-          ensureCredentialMeta(config.credentials[providerId]);
-          await saveConfig(config);
-        }
-      }
-    }
+    // Auth errors are treated like quota errors — exhaust + failover, never delete.
+    // A failed OAuth refresh might be temporary (rate limited, network issue).
 
     const group = config.groups[state.activeGroup];
     if (!group) return;
