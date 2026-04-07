@@ -11,8 +11,8 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import type { CustomEntry } from "@mariozechner/pi-coding-agent";
 import { chmodSync, readFileSync, writeFileSync } from "fs";
-import { readFile, writeFile } from "fs/promises";
-import { join } from "path";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { dirname, join } from "path";
 import { homedir } from "os";
 import lockfile from "proper-lockfile";
 import {
@@ -64,8 +64,18 @@ const AUTH_PATH = join(AGENT_DIR, "auth.json");
 const LOCK_OPTS = {
   retries: { retries: 10, factor: 2, minTimeout: 100, maxTimeout: 10000, randomize: true },
   stale: 30000,
+  realpath: false,
 };
 
+async function ensureJsonFile(filePath: string): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true });
+  try {
+    await writeFile(filePath, "{}", { encoding: "utf-8", mode: 0o600, flag: "wx" });
+  } catch (error) {
+    const err = error as NodeJS.ErrnoException;
+    if (err.code !== "EEXIST") throw err;
+  }
+}
 
 /**
  * Atomic read-modify-write with file locking.
@@ -75,6 +85,7 @@ async function withFileLock<T>(
   filePath: string,
   fn: (raw: string) => Promise<{ raw?: string; result: T }>,
 ): Promise<T> {
+  await ensureJsonFile(filePath);
   const release = await lockfile.lock(filePath, LOCK_OPTS);
   try {
     const current = await readFile(filePath, "utf-8").catch(() => "{}");
@@ -120,6 +131,25 @@ function updateStatusBar(ctx?: ExtensionContext) {
   const exhaustedCount = countActiveExhausted(state.exhausted);
   const exhaustedStr = exhaustedCount > 0 ? ` | ${exhaustedCount} exhausted` : "";
   ui.setStatus("ha", `HA: ${group} (${model})${exhaustedStr}`);
+}
+
+function getHaGroupUsageHint(ctx?: ExtensionContext): string {
+  const currentModel = ctx?.model ? `${ctx.model.provider}/${ctx.model.id}` : "<provider/model-id>";
+  return [
+    "Usage: /ha-group <name> <provider/model-id> [provider/model-id ...]",
+    "Tip: run /model and copy the exact provider/model IDs you want in failover order.",
+    `Example: /ha-group default ${currentModel} <fallback-provider/model-id>`,
+  ].join("\n");
+}
+
+function getHaSetupHint(ctx?: ExtensionContext): string {
+  return [
+    "[HA] Setup:",
+    "  1. /login once per provider/account you want HA to use",
+    "  2. /model to inspect exact provider/model IDs",
+    `  3. ${getHaGroupUsageHint(ctx).split("\n").at(-1)}`,
+    "  4. /ha to inspect active group, credentials, and exhaustion state",
+  ].join("\n");
 }
 
 let config: HaConfig | null = null;
@@ -409,7 +439,7 @@ export default function (pi: ExtensionAPI) {
       reloadConfigFromDisk();
       if (!config) {
         ctx.ui.notify(
-          "[HA] No configuration found. Create ~/.pi/agent/ha.json or use /ha-group.",
+          `${getHaSetupHint(ctx)}\n\nConfig file: ~/.pi/agent/ha.json`,
           "warning",
         );
         return;
@@ -420,6 +450,9 @@ export default function (pi: ExtensionAPI) {
       const lines: string[] = [];
       lines.push("⚠️  ha.json stores credentials in plaintext at ~/.pi/agent/ha.json — keep this file private (chmod 600).");
       lines.push(`Active Group: ${state.activeGroup || "none"}`);
+      if (Object.keys(config.groups).length === 0) {
+        lines.push(`\n${getHaSetupHint(ctx)}`);
+      }
 
       // Groups
       if (Object.keys(config.groups).length > 0) {
@@ -535,7 +568,7 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const parts = (args || "").trim().split(/\s+/).filter(Boolean);
       if (parts.length < 2) {
-        ctx.ui.notify("Usage: /ha-group <name> <model-id1> [model-id2 ...]", "warning");
+        ctx.ui.notify(getHaGroupUsageHint(ctx), "warning");
         return;
       }
       if (!config) {
@@ -555,7 +588,7 @@ export default function (pi: ExtensionAPI) {
         }
         const model = resolveGroupEntryModel(id, ctx.modelRegistry);
         if (!model) {
-          ctx.ui.notify(`[HA] Warning: model '${id}' not found in registry`, "warning");
+          ctx.ui.notify(`[HA] Warning: model '${id}' not found in registry. Use /model to copy the exact ID.`, "warning");
         }
       }
 
@@ -570,6 +603,12 @@ export default function (pi: ExtensionAPI) {
         `[HA] Group '${name}' set with ${entries.length} model(s): ${modelIds.join(", ")}`,
         "info",
       );
+      if (!config.credentials || Object.keys(config.credentials).length === 0) {
+        ctx.ui.notify(
+          "[HA] No credentials synced yet. Run /login for each provider/account you want HA to use, then /ha to verify.",
+          "warning",
+        );
+      }
     },
   });
 

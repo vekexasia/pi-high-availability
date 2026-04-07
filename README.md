@@ -32,13 +32,24 @@ pi install npm:pi-high-availability
 
 ### 3. Configure Your First Group
 
-Use `/ha-group` to create a failover group with an ordered list of model IDs:
+First run `/model` and copy the exact `provider/model-id` values you want. Then use `/ha-group` to create a failover group with those IDs in priority order:
 
 ```
+/model
 /ha-group default anthropic/claude-3-5-sonnet google-gemini-cli/gemini-1.5-pro openai/gpt-4o
 ```
 
 This creates (or updates) a group named `default`, sets it as the active group, and configures the failover priority left-to-right.
+
+### 4. Verify Setup
+
+Run:
+
+```
+/ha
+```
+
+You should see the active group, configured entries, and any synced credentials.
 
 ## 💬 Commands
 
@@ -51,6 +62,8 @@ Show current HA status: active group, all groups with their model entries, crede
 
 ### `/ha-group <name> <model-id1> [model-id2 ...]`
 Create or update a failover group. Sets the group as active and default immediately.
+
+Tip: run `/model` first and copy exact IDs from there.
 
 ```
 /ha-group fast anthropic/claude-3-5-sonnet openai/gpt-4o
