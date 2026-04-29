@@ -25,9 +25,11 @@ import {
   setDefaultCredentialName,
   type ProviderCredentials,
 } from "./credentialMeta";
+import { mergeCredentialProvidersFromDisk } from "./configMerge";
 import {
   classifyError,
   countActiveExhausted,
+  credentialMatchesAuth,
   determineCredentialType,
   determineNewCredentialName,
   findMatchingCredentialName,
@@ -172,28 +174,21 @@ function reloadConfigFromDisk(): void {
   }
 }
 
-async function saveConfig(cfg: HaConfig): Promise<void> {
+type SaveConfigOptions = {
+  replaceCredentialProviders?: Iterable<string> | "all";
+};
+
+async function saveConfig(cfg: HaConfig, options: SaveConfigOptions = {}): Promise<void> {
   normalizeCredentialProviders(cfg.credentials);
   config = cfg;
   await withFileLock(CONFIG_PATH, async (raw) => {
-    // Merge credentials from disk so we don't clobber another instance's additions
+    // Merge credentials from disk so we don't clobber another instance's additions,
+    // but allow targeted replace flows (rename/delete/clear) to persist.
     try {
       const disk = JSON.parse(raw) as HaConfig;
-      if (disk.credentials && config!.credentials) {
-        for (const [provider, diskCreds] of Object.entries(disk.credentials)) {
-          if (!config!.credentials[provider]) {
-            config!.credentials[provider] = structuredClone(diskCreds);
-            continue;
-          }
-          const target = config!.credentials[provider];
-          for (const [name, value] of Object.entries(diskCreds)) {
-            if (name === "__meta") continue;
-            if (!Object.prototype.hasOwnProperty.call(target, name)) {
-              target[name] = structuredClone(value);
-            }
-          }
-        }
-      }
+      config!.credentials = mergeCredentialProvidersFromDisk(config!.credentials, disk.credentials, {
+        replaceProviders: options.replaceCredentialProviders,
+      });
     } catch {
       // Disk parse failed — write our config as-is
     }
@@ -239,7 +234,20 @@ function syncAuthToHa(auth: AuthJson, ctx?: ExtensionContext): boolean {
       state.activeCredential.set(providerId, name);
     } else {
       ensureCredentialMeta(stored);
-      state.activeCredential.set(providerId, foundName);
+      // Prefer the currently active credential if it still matches auth.json.
+      // When multiple entries share the same refresh token / API key (e.g.
+      // copies of the same account), findMatchingCredentialName always returns
+      // the first one.  Resetting activeCredential on every turn_start would
+      // undo any failover credential switch, break exhaustion tracking, and
+      // waste the retry budget on useless same-account switches — preventing
+      // provider-level failover from ever being reached.
+      const activeName = state.activeCredential.get(providerId);
+      const activeEntry = activeName ? stored[activeName] : undefined;
+      if (activeEntry && credentialMatchesAuth(activeEntry, creds)) {
+        // keep current
+      } else {
+        state.activeCredential.set(providerId, foundName);
+      }
     }
   }
   return changed;
@@ -285,10 +293,25 @@ async function switchCred(providerId: string, name: string, ctx?: ExtensionConte
   // Keep `type` — authStorage.getApiKey() needs it to identify oauth vs api_key credentials
   const { __meta: _meta, ...credToSave } = structuredClone(stored[name]);
 
+  let didWrite = false;
   await withFileLock(AUTH_PATH, async (raw) => {
     const auth = JSON.parse(raw) as AuthJson;
-    auth[providerId] = credToSave;
-    return { raw: JSON.stringify(auth, null, 2), result: undefined };
+    const currentAuth = auth[providerId];
+
+    // If auth.json already has a credential for this provider that matches by
+    // refresh token or API key, keep auth.json's version — pi may have silently
+    // refreshed OAuth access tokens, and ha.json's copy for this non-active
+    // credential is likely stale.  Overwriting would corrupt the fresh tokens,
+    // cascading across instances when other pi's syncActiveCredentialFromAuth()
+    // reads the stale tokens back into ha.json.
+    if (currentAuth && credentialMatchesAuth(credToSave, currentAuth)) {
+      // Same account — auth.json has the fresher tokens, keep them.
+    } else {
+      auth[providerId] = credToSave;
+      didWrite = true;
+    }
+
+    return didWrite ? { raw: JSON.stringify(auth, null, 2), result: undefined } : { result: undefined };
   });
   state.activeCredential.set(providerId, name);
 
@@ -304,6 +327,37 @@ async function switchCred(providerId: string, name: string, ctx?: ExtensionConte
 
   persistState();
   return true;
+}
+
+async function clearAuthProviders(providerIds: Iterable<string>, ctx?: ExtensionContext): Promise<string[]> {
+  const ids = [...new Set(providerIds)].filter(Boolean);
+  if (ids.length === 0) return [];
+
+  try {
+    const removed = await withFileLock(AUTH_PATH, async (raw) => {
+      const auth = JSON.parse(raw) as AuthJson;
+      const deleted: string[] = [];
+
+      for (const providerId of ids) {
+        if (Object.prototype.hasOwnProperty.call(auth, providerId)) {
+          delete auth[providerId];
+          deleted.push(providerId);
+        }
+      }
+
+      return deleted.length > 0
+        ? { raw: JSON.stringify(auth, null, 2), result: deleted }
+        : { result: deleted };
+    });
+
+    if (removed.length > 0 && ctx?.modelRegistry?.authStorage?.reload) {
+      ctx.modelRegistry.authStorage.reload();
+    }
+
+    return removed;
+  } catch {
+    return [];
+  }
 }
 
 function updateActiveCredentialsFromAuth(auth: AuthJson) {
@@ -557,7 +611,7 @@ export default function (pi: ExtensionAPI) {
         state.activeCredential.set(provider, newName);
       }
 
-      await saveConfig(config);
+      await saveConfig(config, { replaceCredentialProviders: [provider] });
       ctx.ui.notify(`[HA] Renamed ${provider}: ${oldName} → ${newName}`, "info");
     },
   });
@@ -679,12 +733,14 @@ export default function (pi: ExtensionAPI) {
 
       // /ha-clear — clear ALL credentials for ALL providers
       if (parts.length === 0) {
-        const providerCount = Object.keys(config.credentials).length;
+        const providers = Object.keys(config.credentials);
+        const providerCount = providers.length;
         if (!await ctx.ui.confirm("Clear all HA credentials", `Delete all credentials for ${providerCount} provider(s)? This cannot be undone.`)) return;
         config.credentials = {};
         state.activeCredential.clear();
         state.exhausted.clear();
-        await saveConfig(config);
+        await clearAuthProviders(providers, ctx);
+        await saveConfig(config, { replaceCredentialProviders: "all" });
         persistState();
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials (${providerCount} provider(s)).`, "info");
@@ -706,7 +762,8 @@ export default function (pi: ExtensionAPI) {
         for (const n of names) {
           state.exhausted.delete(getCredentialExhaustionKey(provider, n));
         }
-        await saveConfig(config);
+        await clearAuthProviders([provider], ctx);
+        await saveConfig(config, { replaceCredentialProviders: [provider] });
         persistState();
         updateStatusBar(ctx);
         ctx.ui.notify(`[HA] Cleared all credentials for ${provider} (${names.length} key(s)).`, "info");
@@ -737,13 +794,14 @@ export default function (pi: ExtensionAPI) {
       delete stored[name];
       state.exhausted.delete(getCredentialExhaustionKey(provider, name));
 
-      // Update active credential if we just deleted the active one
+      // Update active credential/auth.json if we just deleted the active one
       if (state.activeCredential.get(provider) === name) {
         const remaining = getCredentialNames(stored);
         if (remaining.length > 0) {
-          state.activeCredential.set(provider, remaining[0]);
+          await switchCred(provider, remaining[0], ctx);
         } else {
           state.activeCredential.delete(provider);
+          await clearAuthProviders([provider], ctx);
         }
       }
 
@@ -759,7 +817,7 @@ export default function (pi: ExtensionAPI) {
         delete config.credentials[provider];
       }
 
-      await saveConfig(config);
+      await saveConfig(config, { replaceCredentialProviders: [provider] });
       persistState();
       updateStatusBar(ctx);
       ctx.ui.notify(`[HA] Cleared credential '${name}' for ${provider}.`, "info");

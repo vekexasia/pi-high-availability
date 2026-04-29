@@ -202,6 +202,17 @@ export function credentialFingerprint(cred: Record<string, unknown>): string {
   return JSON.stringify(filtered, Object.keys(filtered).sort());
 }
 
+/** Check whether a single stored credential object matches auth.json credentials. */
+export function credentialMatchesAuth(
+  stored: Record<string, unknown>,
+  authCreds: Record<string, unknown>,
+): boolean {
+  if (typeof stored !== "object" || stored === null) return false;
+  if (authCreds.refresh && stored.refresh === authCreds.refresh) return true;
+  if (authCreds.key && stored.key === authCreds.key) return true;
+  return false;
+}
+
 export function findMatchingCredentialName(
   stored: ProviderCredentials,
   authCreds: Record<string, unknown>,

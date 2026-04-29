@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import {
   classifyError,
+  credentialMatchesAuth,
   getCredentialExhaustionKey,
   getEntryExhaustionKey,
   isExhausted,
@@ -468,6 +469,45 @@ describe("pickCredentialForProvider", () => {
     };
     exhausted.set("entry:anthropic/claude-3", { exhaustedAt: 9000, cooldownMs: 5000 });
     expect(pickCredentialForProvider("anthropic", creds, activeCredential, exhausted, now)).toBe("primary");
+  });
+});
+
+// ─── credentialMatchesAuth ───────────────────────────────────────────────────
+
+describe("credentialMatchesAuth", () => {
+  it("matches by refresh token", () => {
+    expect(credentialMatchesAuth({ refresh: "token-1" }, { refresh: "token-1" })).toBe(true);
+  });
+
+  it("matches by API key", () => {
+    expect(credentialMatchesAuth({ key: "sk-123" }, { key: "sk-123" })).toBe(true);
+  });
+
+  it("returns false when refresh tokens differ", () => {
+    expect(credentialMatchesAuth({ refresh: "old" }, { refresh: "new" })).toBe(false);
+  });
+
+  it("returns false when keys differ", () => {
+    expect(credentialMatchesAuth({ key: "sk-old" }, { key: "sk-new" })).toBe(false);
+  });
+
+  it("returns false for null / non-object stored", () => {
+    expect(credentialMatchesAuth(null as any, { key: "sk-1" })).toBe(false);
+  });
+
+  it("ignores access token differences when refresh matches", () => {
+    expect(credentialMatchesAuth(
+      { refresh: "stable", access: "old" },
+      { refresh: "stable", access: "new" },
+    )).toBe(true);
+  });
+
+  it("returns false when auth has refresh but stored does not", () => {
+    expect(credentialMatchesAuth({ key: "sk-1" }, { refresh: "rt" })).toBe(false);
+  });
+
+  it("returns false when auth has key but stored does not", () => {
+    expect(credentialMatchesAuth({ refresh: "rt" }, { key: "sk-1" })).toBe(false);
   });
 });
 
