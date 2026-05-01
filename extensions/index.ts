@@ -37,6 +37,7 @@ import {
   getEntryExhaustionKey,
   getCurrentGroupEntry,
   isExhausted as isExhaustedCore,
+  isStableIdentityMismatch,
   markExhausted as markExhaustedCore,
   mergeConfigFromDisk,
   pickCredentialForProvider as pickCredentialForProviderCore,
@@ -269,9 +270,17 @@ async function syncActiveCredentialFromAuth(): Promise<boolean> {
     const activeName = state.activeCredential.get(providerId);
     if (!activeName || !stored[activeName]) continue;
 
+    const existing = stored[activeName];
+
+    // Auth.json may belong to a different account (e.g. user re-ran `codex login`
+    // against a fresh account after the active one exhausted). Detect via stable
+    // identifiers; if they disagree, leave the stored entry alone — syncAuthToHa
+    // will then add the auth credentials as a new backup instead of clobbering
+    // the existing slot.
+    if (isStableIdentityMismatch(existing, currentAuth)) continue;
+
     // Overwrite token fields with fresh data; preserve our metadata fields (type)
     const fresh = structuredClone(currentAuth);
-    const existing = stored[activeName];
     const merged = { ...existing, ...fresh };
     if (existing.type) merged.type = existing.type;
 

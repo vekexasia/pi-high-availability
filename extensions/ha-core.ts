@@ -208,8 +208,25 @@ export function credentialMatchesAuth(
   authCreds: Record<string, unknown>,
 ): boolean {
   if (typeof stored !== "object" || stored === null) return false;
+  if (authCreds.accountId && stored.accountId === authCreds.accountId) return true;
   if (authCreds.refresh && stored.refresh === authCreds.refresh) return true;
   if (authCreds.key && stored.key === authCreds.key) return true;
+  return false;
+}
+
+/**
+ * Returns true when stored and auth carry stable identifiers (key or accountId)
+ * on both sides that disagree — i.e. auth.json clearly represents a different
+ * account than the stored entry. Refresh tokens rotate on OAuth refresh, so
+ * they are not used here.
+ */
+export function isStableIdentityMismatch(
+  stored: Record<string, unknown>,
+  authCreds: Record<string, unknown>,
+): boolean {
+  if (typeof stored !== "object" || stored === null) return false;
+  if (typeof stored.key === "string" && typeof authCreds.key === "string" && stored.key !== authCreds.key) return true;
+  if (typeof stored.accountId === "string" && typeof authCreds.accountId === "string" && stored.accountId !== authCreds.accountId) return true;
   return false;
 }
 
@@ -217,10 +234,11 @@ export function findMatchingCredentialName(
   stored: ProviderCredentials,
   authCreds: Record<string, unknown>,
 ): string | null {
-  // Phase 1: match on stable identity fields only (access tokens change on OAuth refresh)
+  // Phase 1: match on stable identity fields only (access + refresh rotate on OAuth refresh)
   for (const [name, existing] of Object.entries(stored)) {
     if (!isCredentialEntryKey(name)) continue;
     if (typeof existing !== "object" || existing === null) continue;
+    if (authCreds.accountId && existing.accountId === authCreds.accountId) return name;
     if (authCreds.refresh && existing.refresh === authCreds.refresh) return name;
     if (authCreds.key && existing.key === authCreds.key) return name;
   }

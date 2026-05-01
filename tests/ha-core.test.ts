@@ -5,6 +5,7 @@ import {
   getCredentialExhaustionKey,
   getEntryExhaustionKey,
   isExhausted,
+  isStableIdentityMismatch,
   markExhausted,
   countActiveExhausted,
   getCurrentGroupEntry,
@@ -509,6 +510,61 @@ describe("credentialMatchesAuth", () => {
   it("returns false when auth has key but stored does not", () => {
     expect(credentialMatchesAuth({ refresh: "rt" }, { key: "sk-1" })).toBe(false);
   });
+
+  it("matches by accountId even if refresh has rotated", () => {
+    expect(credentialMatchesAuth(
+      { refresh: "rt-old", accountId: "acct-A" },
+      { refresh: "rt-new", accountId: "acct-A" },
+    )).toBe(true);
+  });
+
+  it("returns false when accountIds differ even if other fields are absent", () => {
+    expect(credentialMatchesAuth(
+      { refresh: "rt-A", accountId: "acct-A" },
+      { refresh: "rt-B", accountId: "acct-B" },
+    )).toBe(false);
+  });
+});
+
+// ─── isStableIdentityMismatch ───────────────────────────────────────────────
+
+describe("isStableIdentityMismatch", () => {
+  it("returns false when no stable identifiers are present on either side", () => {
+    expect(isStableIdentityMismatch({ refresh: "a" }, { refresh: "b" })).toBe(false);
+  });
+
+  it("returns true when both have key and they differ", () => {
+    expect(isStableIdentityMismatch({ key: "sk-old" }, { key: "sk-new" })).toBe(true);
+  });
+
+  it("returns false when both have key and they match", () => {
+    expect(isStableIdentityMismatch({ key: "sk-1" }, { key: "sk-1" })).toBe(false);
+  });
+
+  it("returns true when both have accountId and they differ (codex re-login)", () => {
+    expect(isStableIdentityMismatch(
+      { refresh: "rt-A", accountId: "acct-A" },
+      { refresh: "rt-B", accountId: "acct-B" },
+    )).toBe(true);
+  });
+
+  it("returns false when accountId matches but refresh has rotated", () => {
+    expect(isStableIdentityMismatch(
+      { refresh: "rt-old", accountId: "acct-A" },
+      { refresh: "rt-new", accountId: "acct-A" },
+    )).toBe(false);
+  });
+
+  it("returns false when accountId is only on one side (cannot prove different)", () => {
+    expect(isStableIdentityMismatch(
+      { refresh: "rt-A" },
+      { refresh: "rt-B", accountId: "acct-B" },
+    )).toBe(false);
+  });
+
+  it("returns false for null stored", () => {
+    expect(isStableIdentityMismatch(null as any, { key: "sk-1" })).toBe(false);
+  });
 });
 
 // ─── findMatchingCredentialName ──────────────────────────────────────────────
@@ -566,6 +622,42 @@ describe("findMatchingCredentialName", () => {
     };
     // Simulate a token refresh: same refresh token, different access token
     expect(findMatchingCredentialName(stored, { refresh: "stable-refresh", access: "new-access" })).toBe("primary");
+  });
+
+  it("matches by accountId after refresh-token rotation (codex)", () => {
+    const stored = {
+      primary: { refresh: "rt-old", accountId: "acct-A", type: "oauth" },
+      __meta: { defaultName: "primary" },
+    };
+    // Codex rotates refresh on every refresh; accountId stays stable.
+    expect(findMatchingCredentialName(
+      stored,
+      { refresh: "rt-rotated", accountId: "acct-A" },
+    )).toBe("primary");
+  });
+
+  it("returns null when auth represents a different account (codex re-login)", () => {
+    const stored = {
+      primary: { refresh: "rt-A", accountId: "acct-A", type: "oauth" },
+      __meta: { defaultName: "primary" },
+    };
+    // User ran `codex login` against a fresh account after the active one exhausted.
+    expect(findMatchingCredentialName(
+      stored,
+      { refresh: "rt-B", accountId: "acct-B" },
+    )).toBeNull();
+  });
+
+  it("picks the matching backup by accountId when one already exists", () => {
+    const stored = {
+      primary: { refresh: "rt-A-old", accountId: "acct-A", type: "oauth" },
+      "backup-1": { refresh: "rt-B-old", accountId: "acct-B", type: "oauth" },
+      __meta: { defaultName: "primary" },
+    };
+    expect(findMatchingCredentialName(
+      stored,
+      { refresh: "rt-B-rotated", accountId: "acct-B" },
+    )).toBe("backup-1");
   });
 });
 
