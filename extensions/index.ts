@@ -10,9 +10,10 @@ import type {
   SessionMessageEntry,
 } from "@mariozechner/pi-coding-agent";
 import type { CustomEntry } from "@mariozechner/pi-coding-agent";
-import { chmodSync, readFileSync, writeFileSync } from "fs";
-import { mkdir, readFile, writeFile } from "fs/promises";
-import { dirname, join } from "path";
+import { randomUUID } from "crypto";
+import { chmodSync, closeSync, fsyncSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "fs";
+import { mkdir, open, readFile, rename, unlink, writeFile } from "fs/promises";
+import { basename, dirname, join } from "path";
 import { homedir } from "os";
 import lockfile from "proper-lockfile";
 import {
@@ -80,21 +81,87 @@ async function ensureJsonFile(filePath: string): Promise<void> {
   }
 }
 
+function getTempFilePath(filePath: string): string {
+  return join(dirname(filePath), `.${basename(filePath)}.${randomUUID()}.tmp`);
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+  if (process.platform === "win32") return;
+  const directory = await open(directoryPath, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
+function syncDirectorySync(directoryPath: string): void {
+  if (process.platform === "win32") return;
+  const directory = openSync(directoryPath, "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
+  }
+}
+
+async function writeFileAtomically(filePath: string, raw: string): Promise<void> {
+  const tempPath = getTempFilePath(filePath);
+  try {
+    await writeFile(tempPath, raw, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    const handle = await open(tempPath, "r+");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(tempPath, filePath);
+    await syncDirectory(dirname(filePath));
+  } catch (error) {
+    try { await unlink(tempPath); } catch {}
+    throw error;
+  }
+}
+
+function writeFileAtomicallySync(filePath: string, raw: string): void {
+  const tempPath = getTempFilePath(filePath);
+  try {
+    writeFileSync(tempPath, raw, { encoding: "utf-8", mode: 0o600, flag: "wx" });
+    const fd = openSync(tempPath, "r+");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tempPath, filePath);
+    syncDirectorySync(dirname(filePath));
+  } catch (error) {
+    try { unlinkSync(tempPath); } catch {}
+    throw error;
+  }
+}
+
 /**
  * Atomic read-modify-write with file locking.
  * `fn` receives the current file content and returns an optional new content to write.
  */
-async function withFileLock<T>(
+export async function withFileLock<T>(
   filePath: string,
   fn: (raw: string) => Promise<{ raw?: string; result: T }>,
 ): Promise<T> {
   await ensureJsonFile(filePath);
   const release = await lockfile.lock(filePath, LOCK_OPTS);
   try {
-    const current = await readFile(filePath, "utf-8").catch(() => "{}");
+    let current: string;
+    try {
+      current = await readFile(filePath, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      current = "{}";
+    }
     const { raw, result } = await fn(current);
     if (raw !== undefined) {
-      await writeFile(filePath, raw, { encoding: "utf-8", mode: 0o600 });
+      await writeFileAtomically(filePath, raw);
     }
     return result;
   } finally {
@@ -159,7 +226,10 @@ let config: HaConfig | null = null;
 
 async function loadAuthJson(): Promise<AuthJson> {
   try { return JSON.parse(await readFile(AUTH_PATH, "utf-8")) as AuthJson; }
-  catch { return {}; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return {};
+  }
 }
 
 function reloadConfigFromDisk(): void {
@@ -170,8 +240,8 @@ function reloadConfigFromDisk(): void {
       return;
     }
     config = mergeConfigFromDisk(config, fresh);
-  } catch {
-    // Silently ignore — stale config is better than crashing
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 }
 
@@ -185,14 +255,10 @@ async function saveConfig(cfg: HaConfig, options: SaveConfigOptions = {}): Promi
   await withFileLock(CONFIG_PATH, async (raw) => {
     // Merge credentials from disk so we don't clobber another instance's additions,
     // but allow targeted replace flows (rename/delete/clear) to persist.
-    try {
-      const disk = JSON.parse(raw) as HaConfig;
-      config!.credentials = mergeCredentialProvidersFromDisk(config!.credentials, disk.credentials, {
-        replaceProviders: options.replaceCredentialProviders,
-      });
-    } catch {
-      // Disk parse failed — write our config as-is
-    }
+    const disk = JSON.parse(raw) as HaConfig;
+    config!.credentials = mergeCredentialProvidersFromDisk(config!.credentials, disk.credentials, {
+      replaceProviders: options.replaceCredentialProviders,
+    });
     return { raw: JSON.stringify(config, null, 2), result: undefined };
   });
 }
@@ -422,11 +488,15 @@ export default function (pi: ExtensionAPI) {
       if (config?.defaultGroup) state.activeGroup = config.defaultGroup;
 
       let startupAuth: AuthJson = {};
-      try { startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as AuthJson; } catch {}
+      try {
+        startupAuth = JSON.parse(readFileSync(AUTH_PATH, "utf-8")) as AuthJson;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
 
       if (syncAuthToHa(startupAuth)) {
         normalizeCredentialProviders(config!.credentials);
-        writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), { encoding: "utf-8", mode: 0o600 });
+        writeFileAtomicallySync(CONFIG_PATH, JSON.stringify(config, null, 2));
       }
 
       updateActiveCredentialsFromAuth(startupAuth);
