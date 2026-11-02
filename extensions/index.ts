@@ -840,7 +840,16 @@ export default function (pi: ExtensionAPI) {
     }
     state.isRetrying = false;       // Reset retry guard at turn boundary
     reloadConfigFromDisk();
-    if (!state.activeGroup && config?.defaultGroup) {
+    const envGroup = process.env.PI_HA_GROUP;
+    if (envGroup && config?.groups?.[envGroup]) {
+      state.activeGroup = envGroup;
+    } else if (envGroup) {
+      state.activeGroup = config?.defaultGroup || null;
+      ctx.ui.notify(
+        `[HA] Group '${envGroup}' not found. Using default group '${config?.defaultGroup ?? "none"}'.`,
+        "warning",
+      );
+    } else if (!state.activeGroup && config?.defaultGroup) {
       state.activeGroup = config.defaultGroup;
     }
     updateStatusBar(ctx);
